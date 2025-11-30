@@ -212,3 +212,6 @@ __marimo__/
 assets/**/*.zip
 assets/**/*.pkl
 assets/**/*.mp4
+reports/tmp
+reports/*.log
+reports/.tmp

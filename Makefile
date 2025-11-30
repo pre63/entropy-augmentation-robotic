@@ -4,7 +4,7 @@ OS := $(shell uname -s)
 
 DEVICE=cpu
 
-default: install
+default: experiments report
 
 ubuntu:
 	if ! command -v lsb_release > /dev/null; then \
@@ -44,10 +44,16 @@ clean:
 	@rm -rf __pycache__/
 	@rm -rf .venv
 
-experiments: fix
+setup: 
+	@mkdir -p .logs
+	@mkdir -p reports
+	
+experiments: fix setup
 	@source .venv/bin/activate; \
-	PYTHONPATH=. python -m scripts.experiments
+	PYTHONPATH=. python -m scripts.experiments 2>&1 | tee -a .logs/experiments.log
 
-report: fix
+report: fix setup
+	@rm -f reports/.tmp
 	@source .venv/bin/activate; \
-	PYTHONPATH=. python -m scripts.report
+	PYTHONPATH=. python -m scripts.report 2>&1 | tee -a reports/.tmp
+	@mv reports/.tmp reports/report.md

@@ -112,12 +112,10 @@ def load_hyperparams(model_class, env_id):
 
 
 def run_experiment(configs, n_envs, total_timesteps, num_runs, n_eval_episodes):
-
   base_compare_dir = "assets"
-  all_ts = [1_000_000, 2_000_000, 10_000_000]
 
   for idx, (env_id, Variant, noise_level) in enumerate(configs):
-    compare_dir = os.path.join(base_compare_dir, f"{env_id}_ts{total_timesteps}_runs{num_runs}".lower())
+    compare_dir = os.path.join(base_compare_dir, f"{env_id}".lower())
     os.makedirs(compare_dir, exist_ok=True)
 
     variant_base_name = Variant.__name__
@@ -126,44 +124,11 @@ def run_experiment(configs, n_envs, total_timesteps, num_runs, n_eval_episodes):
     for run in range(num_runs):
       key = f"{variant_name}_run{run}"
       pkl_path = os.path.join(compare_dir, f"{key}.pkl")
-
-      # New logic: check for higher steps pkl and truncate if exists
-      higher_ts_list = sorted([t for t in all_ts if t > total_timesteps], reverse=True)
-      truncated = False
-      for higher_ts in higher_ts_list:
-        print(f"  Checking for higher ts {higher_ts} for possible truncation...")
-        higher_dir = os.path.join(base_compare_dir, f"{env_id}_ts{higher_ts}_runs{num_runs}".lower())
-        higher_pkl = os.path.join(higher_dir, f"{key}.pkl")
-        if os.path.exists(higher_pkl):
-          with open(higher_pkl, "rb") as f:
-            data = pickle.load(f)
-          trunc_ts = total_timesteps
-          if len(data["timesteps"]) < trunc_ts:
-            continue
-          data["timesteps"] = data["timesteps"][:trunc_ts]
-          data["step_rewards"] = data["step_rewards"][:trunc_ts]
-          keep_idx = [i for i, e in enumerate(data["episode_end_timesteps"]) if e <= trunc_ts]
-          data["episode_end_timesteps"] = [data["episode_end_timesteps"][i] for i in keep_idx]
-          data["episode_rewards"] = [data["episode_rewards"][i] for i in keep_idx]
-          if "inference_mean_reward" in data:
-            del data["inference_mean_reward"]
-          if "inference_std_reward" in data:
-            del data["inference_std_reward"]
-          with open(pkl_path, "wb") as wf:
-            pickle.dump(data, wf)
-          print(f"  Truncated {key} from {higher_ts} to {total_timesteps}")
-          truncated = True
-          break
-
-      if truncated:
-        continue
-
-      # Existing check
       if os.path.exists(pkl_path):
-        print(f"  Skipping {key}, already done")
+        print(f"  Skipping existing run {run+1}/{num_runs} for {variant_name} on {env_id}")
         continue
 
-      print(f"  Run {run+1}/{num_runs} for {variant_name}")
+      print(f"  Run {run+1}/{num_runs} for {variant_name} on {env_id}")
       params = load_hyperparams(Variant, env_id)
       if noise_level is not None:
         params["noise_configs"] = [
@@ -198,6 +163,7 @@ def run_experiment(configs, n_envs, total_timesteps, num_runs, n_eval_episodes):
           "episode_end_timesteps": [ep["end_timestep"] for ep in episode_infos],
           "inference_mean_reward": float(mean_reward),
           "inference_std_reward": float(std_reward),
+          "rollout_metrics": model.rollout_metrics,
         }
 
         # Save to individual pkl
@@ -214,32 +180,19 @@ def run_experiment(configs, n_envs, total_timesteps, num_runs, n_eval_episodes):
 
 
 if __name__ == "__main__":
+  # not relevant for research concerns
   n_envs = 8
-  num_runs = 100
   n_eval_episodes = 100
 
-  configs = [
-    # ===================================================================
-    # Humanoid-v5
-    # ===================================================================
-    ("Humanoid-v5", TRPO, None),
-    ("Humanoid-v5", TRPOR, None),
-    # ===================================================================
-    # HalfCheetah-v5
-    # ===================================================================
-    ("HalfCheetah-v5", TRPO, None),
-    ("HalfCheetah-v5", TRPOR, None),
-    # ===================================================================
-    # Hopper-v5
-    # ===================================================================
-    ("Hopper-v5", TRPO, None),
-    ("Hopper-v5", TRPOR, None),
-    # ===================================================================
-    # Swimmer-v5
-    ("Swimmer-v5", TRPO, None),
-    ("Swimmer-v5", TRPOR, None),
-  ]
-  for i in [0.1, 0.2]:
+  # Experimentation schedule
+
+  # 1M timesteps is sufficient to see the trends in performance for these environments, sampling oonger runs 2M, 10M has not shown significant changes in trend
+  timesteps = 1_000_000
+  # For the lower-dimentionality environments, we can run 100 runs for better statistical significance and smoothing
+  num_runs = 100
+
+  configs = []
+  for i in [None, 0.1, 0.2, -0.1, -0.2]:
     configs.append(("HalfCheetah-v5", TRPOR, i))
     configs.append(("HalfCheetah-v5", TRPO, i))
     configs.append(("Hopper-v5", TRPOR, i))
@@ -247,11 +200,20 @@ if __name__ == "__main__":
     configs.append(("Swimmer-v5", TRPOR, i))
     configs.append(("Swimmer-v5", TRPO, i))
 
-  for i in [0.1, 0.2]:
+  run_experiment(configs, n_envs, timesteps, num_runs, n_eval_episodes)
+
+  # Humanoid experiments runs=20 given that the time per run is much higher
+  for i in [None, 0.1, 0.2, -0.1, -0.2]:
     configs.append(("Humanoid-v5", TRPO, i))
     configs.append(("Humanoid-v5", TRPOR, i))
+    configs.append(("HumanoidStandup-v5", TRPOR, i))
+    configs.append(("HumanoidStandup-v5", TRPO, i))
 
-  for i in [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]:
+  run_experiment(configs, n_envs, timesteps, num_runs, n_eval_episodes)
+
+  # Full exploration of the noise hyperparameter, but fewer runs since these are more anciliary, given that we know that -0.2 to 0.2 provides best results
+  num_runs = 10
+  for i in [None, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, -0.3, -0.4, -0.5, -0.6, -0.7, -0.8, -0.9, -1.0]:
     configs.append(("HalfCheetah-v5", TRPOR, i))
     configs.append(("HalfCheetah-v5", TRPO, i))
     configs.append(("Hopper-v5", TRPOR, i))
@@ -260,26 +222,7 @@ if __name__ == "__main__":
     configs.append(("Swimmer-v5", TRPO, i))
     configs.append(("Humanoid-v5", TRPO, i))
     configs.append(("Humanoid-v5", TRPOR, i))
-
-  # ===================================================================
-  # HumanoidStandup-v5
-  # ===================================================================
-  configs.extend(
-    [
-      ("HumanoidStandup-v5", TRPO, None),
-      ("HumanoidStandup-v5", TRPOR, None),
-    ]
-  )
-
-  for i in [0.1, 0.2]:
     configs.append(("HumanoidStandup-v5", TRPOR, i))
     configs.append(("HumanoidStandup-v5", TRPO, i))
 
-  for i in [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]:
-    configs.append(("HumanoidStandup-v5", TRPOR, i))
-    configs.append(("HumanoidStandup-v5", TRPO, i))
-
-  # experiments
-  M1 = 1_000_000
-
-  run_experiment(configs, n_envs, M1, num_runs, n_eval_episodes)
+  run_experiment(configs, n_envs, timesteps, num_runs, n_eval_episodes)

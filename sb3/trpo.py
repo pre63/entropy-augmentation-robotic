@@ -93,7 +93,7 @@ class TRPO(TRPO):
 
     # Print device and verify it is being used
     device = th.device(device if device != "auto" else "cpu")
-    print(f"TRPO is using device: {device}")
+    # print(f"TRPO is using device: {device}")
 
   def _compute_policy_objective(self, advantages, ratio, distribution):
     """Overridable method for computing policy objective."""
