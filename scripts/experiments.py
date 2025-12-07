@@ -189,7 +189,7 @@ if __name__ == "__main__":
   # 1M timesteps is sufficient to see the trends in performance for these environments, sampling oonger runs 2M, 10M has not shown significant changes in trend
   timesteps = 1_000_000
   # For the lower-dimentionality environments, we can run 100 runs for better statistical significance and smoothing
-  num_runs = 20
+  num_runs = 5
 
   configs = []
   for i in [None, 0.1, 0.2, -0.1, -0.2]:

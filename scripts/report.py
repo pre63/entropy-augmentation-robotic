@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-NUM_RUNS_PLOT = 100
+NUM_RUNS_PLOT = 1000
 
 
 def load_file(args):
@@ -722,7 +722,7 @@ def plot_inference_bar(variant_names, variant_names_list, inference_means_lists,
   plt.bar(variant_names_list, inference_means, color=colors_list)
   for x, y, yerr, col in zip(variant_names_list, inference_means, inference_stds, colors_list):
     plt.errorbar(x, y, yerr=yerr, fmt="none", ecolor="black", elinewidth=2, capsize=5, uplims=False, lolims=False)
-  plt.xlabel("variants")
+  plt.xlabel("configurations")
   plt.ylabel("average test return (mean ± std across runs)")
   plt.title(title)
   plt.savefig(os.path.join(compare_dir, filename))
@@ -848,20 +848,20 @@ def report(compare_dir, env_id, disable_downsampling=False, disable_smoothing=Fa
 
   perf_dict = {perf["variant"]: perf["avg_auc_episode"] for perf in model_performances}
 
-  plot_step_rewards(
-    top_indices,
-    variant_names,
-    step_rewards_lists,
-    total_timesteps,
-    downsample_factor,
-    timesteps_np,
-    color_map,
-    perf_dict,
-    compare_dir,
-    "step_plot.png",
-    f"{env_id}",
-    disable_smoothing=disable_smoothing,
-  )
+  # plot_step_rewards(
+  #   top_indices,
+  #   variant_names,
+  #   step_rewards_lists,
+  #   total_timesteps,
+  #   downsample_factor,
+  #   timesteps_np,
+  #   color_map,
+  #   perf_dict,
+  #   compare_dir,
+  #   "step_plot.png",
+  #   f"{env_id}",
+  #   disable_smoothing=disable_smoothing,
+  # )
 
   plot_episode_rewards(
     top_indices,
@@ -1055,7 +1055,7 @@ if __name__ == "__main__":
   disable_downsampling = True
   disable_smoothing = True
 
-  base_compare_dir = "assets"
+  base_compare_dir = "assets1"
   subdirs = sorted(os.listdir(base_compare_dir))
   print("# Table of Contents")
   for subdir in subdirs:
