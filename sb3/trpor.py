@@ -98,13 +98,14 @@ class TRPOR(TRPO):
     for rollout_data in self.rollout_buffer.get(batch_size=None):
       # Optional: sub-sample data for faster computation
       if self.sub_sampling_factor > 1:
+        indices = slice(None, None, self.sub_sampling_factor)
         rollout_data = RolloutBufferSamples(
-          rollout_data.observations[:: self.sub_sampling_factor],
-          rollout_data.actions[:: self.sub_sampling_factor],
+          rollout_data.observations[indices],
+          rollout_data.actions[indices],
           None,  # type: ignore[arg-type]  # old values, not used here
-          rollout_data.old_log_prob[:: self.sub_sampling_factor],
-          rollout_data.advantages[:: self.sub_sampling_factor],
-          None,  # type: ignore[arg-type]  # returns, not used here
+          rollout_data.old_log_prob[indices],
+          rollout_data.advantages[indices],
+          rollout_data.returns[indices],  # Include returns for critic
         )
 
       observations = rollout_data.observations
@@ -113,18 +114,13 @@ class TRPOR(TRPO):
       advantages = rollout_data.advantages
       old_log_prob = rollout_data.old_log_prob
 
-      # Check if the reward threshold is exceeded and activate the replay strategy
-      distribution = self.policy.get_distribution(observations)
-
       if isinstance(self.action_space, spaces.Discrete):
         # Convert discrete action from float to long
         actions = actions.long().flatten()
 
       with th.no_grad():
-        # Note: is copy enough, no need for deepcopy?
-        # If using gSDE and deepcopy, we need to use `old_distribution.distribution`
-        # directly to avoid Pyth errors.
-        old_distribution = copy.copy(self.policy.get_distribution(observations))
+        # Use deepcopy for safety with complex distributions
+        old_distribution = copy.deepcopy(self.policy.get_distribution(observations))
 
       distribution = self.policy.get_distribution(observations)
       log_prob = distribution.log_prob(actions)
@@ -135,8 +131,7 @@ class TRPOR(TRPO):
       # ratio between old and new policy, should be one at the first iteration
       ratio = th.exp(log_prob - old_log_prob)
 
-      # surrogate policy objective
-      # Entropy regularization on the advantage
+      # surrogate policy objective with entropy regularization (matches TRPOR)
       policy_objective = (advantages * ratio).mean() + self.ent_coef * distribution.entropy().mean()
 
       # KL divergence
@@ -182,9 +177,9 @@ class TRPOR(TRPO):
           distribution = self.policy.get_distribution(observations)
           log_prob = distribution.log_prob(actions)
 
-          # New policy objective
+          # New policy objective (include entropy to match original objective)
           ratio = th.exp(log_prob - old_log_prob)
-          new_policy_objective = (advantages * ratio).mean()
+          new_policy_objective = (advantages * ratio).mean() + self.ent_coef * distribution.entropy().mean()
 
           # New KL-divergence
           kl_div = kl_divergence(distribution, old_distribution).mean()
@@ -215,8 +210,8 @@ class TRPOR(TRPO):
     # Critic update
     for _ in range(self.n_critic_updates):
       for rollout_data in self.rollout_buffer.get(self.batch_size):
-        values_pred = self.policy.predict_values(observations)
-        value_loss = F.mse_loss(returns, values_pred.flatten())
+        values_pred = self.policy.predict_values(rollout_data.observations)
+        value_loss = F.mse_loss(rollout_data.returns, values_pred.flatten())
         value_losses.append(value_loss.item())
 
         self.policy.optimizer.zero_grad()
