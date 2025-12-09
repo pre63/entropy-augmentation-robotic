@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 NUM_RUNS_PLOT = 1000
+FIG_SIZE = (20, 10)
 
 
 def load_file(args):
@@ -110,6 +111,199 @@ def compute_timesteps_and_downsample(step_rewards_lists, disable_downsampling=Fa
     downsample_factor = max(1, total_timesteps // 1000)
   timesteps_np = np.arange(downsample_factor // 2 + 1, total_timesteps + 1, downsample_factor)  # Approximate mid-window points
   return total_timesteps, downsample_factor, timesteps_np
+
+
+def get_max_mtime(compare_dir, files):
+  if not files:
+    return 0
+  return max(os.path.getmtime(os.path.join(compare_dir, f)) for f in files if os.path.exists(os.path.join(compare_dir, f)))
+
+
+def get_downsampled_incremental(
+  compare_dir, all_files, cache_file, variant_names, compute_func, lists, total_timesteps, downsample_factor, timesteps_np, per_run_lists=None
+):
+  cache_path = os.path.join(compare_dir, cache_file)
+  cache = {}
+  if os.path.exists(cache_path):
+    with open(cache_path, "rb") as f:
+      cache = pickle.load(f)
+
+  recompute_all = False
+  if (
+    "total_timesteps" not in cache
+    or cache["total_timesteps"] != total_timesteps
+    or "downsample_factor" not in cache
+    or cache["downsample_factor"] != downsample_factor
+  ):
+    recompute_all = True
+
+  # Build variant_files
+  variant_files = {}
+  for filename in all_files:
+    key = filename[:-4]
+    if "_run" in key:
+      parts = key.rsplit("_run", 1)
+      if len(parts) == 2:
+        variant, _ = parts
+        if variant not in variant_files:
+          variant_files[variant] = []
+        variant_files[variant].append(filename)
+
+  downsampled = {}
+  updated = False
+  variants_cache = cache.get("variants", {}) if not recompute_all else {}
+
+  if recompute_all:
+    downsampled = compute_func(variant_names, lists, total_timesteps, downsample_factor, timesteps_np, per_run_lists)
+  else:
+    for var in variant_names:
+      files = variant_files.get(var, [])
+      current_max_mtime = get_max_mtime(compare_dir, files)
+      if var in variants_cache and variants_cache[var]["max_mtime"] >= current_max_mtime:
+        data = variants_cache[var]["data"]
+        downsampled[var] = (np.array(data[0]), np.array(data[1]))
+      else:
+        idx = variant_names.index(var)
+        subset_lists = [lists[idx]]
+        subset_per_run = [per_run_lists[idx]] if per_run_lists is not None else None
+        single_down = compute_func([var], subset_lists, total_timesteps, downsample_factor, timesteps_np, subset_per_run)
+        mean_y, std_y = single_down[var]
+        downsampled[var] = (mean_y, std_y)
+        variants_cache[var] = {"data": (mean_y.tolist(), std_y.tolist()), "max_mtime": current_max_mtime}
+        updated = True
+
+  if recompute_all or updated:
+    if recompute_all:
+      variants_cache = {}
+      for var in variant_names:
+        files = variant_files.get(var, [])
+        max_mtime = get_max_mtime(compare_dir, files)
+        mean_y, std_y = downsampled[var]
+        variants_cache[var] = {"data": (mean_y.tolist(), std_y.tolist()), "max_mtime": max_mtime}
+    new_cache = {"total_timesteps": total_timesteps, "downsample_factor": downsample_factor, "timesteps_np": timesteps_np.tolist(), "variants": variants_cache}
+    with open(cache_path, "wb") as f:
+      pickle.dump(new_cache, f)
+
+  return downsampled
+
+
+def compute_downsampled_steps(variant_names, step_rewards_lists, total_timesteps, downsample_factor, timesteps_np, per_run_lists=None):
+  timesteps_np = np.array(timesteps_np)
+  downsampled = {}
+  num_downsampled = len(timesteps_np)
+  for v_idx, variant in enumerate(variant_names):
+    num_runs = len(step_rewards_lists[v_idx])
+    if num_runs == 0 or not step_rewards_lists[v_idx]:
+      downsampled[variant] = (np.full(num_downsampled, np.nan), np.full(num_downsampled, np.nan))
+      continue
+    ys = []
+    for j in range(num_runs):
+      rews = np.array(step_rewards_lists[v_idx][j])
+      y = np.full(total_timesteps, np.nan, dtype=np.float64)
+      y[: len(rews)] = rews
+      ys.append(y)
+    ys_np = np.array(ys)
+    mean_y = np.full(num_downsampled, np.nan)
+    std_y = np.full(num_downsampled, np.nan)
+    for k in range(num_downsampled):
+      start = k * downsample_factor
+      end = min((k + 1) * downsample_factor, total_timesteps)
+      per_run_window_means = [np.nanmean(y_run[start:end]) for y_run in ys_np if not np.all(np.isnan(y_run[start:end]))]
+      if per_run_window_means:
+        mean_y[k] = np.mean(per_run_window_means)
+        std_y[k] = np.std(per_run_window_means) if len(per_run_window_means) > 1 else 0.0
+    downsampled[variant] = (mean_y, std_y)
+    del ys_np
+  return downsampled
+
+
+def compute_downsampled_episodes(variant_names, episode_lists, total_timesteps, downsample_factor, timesteps_np, per_run_lists=None):
+  timesteps_np = np.array(timesteps_np)
+  downsampled = {}
+  num_downsampled = len(timesteps_np)
+  for v_idx, variant in enumerate(variant_names):
+    num_variant_runs = len(episode_lists[v_idx])
+    if num_variant_runs == 0:
+      downsampled[variant] = (np.full(num_downsampled, np.nan), np.full(num_downsampled, np.nan))
+      continue
+    ys = []
+    for run in range(num_variant_runs):
+      ep_infos = episode_lists[v_idx][run]
+      if not ep_infos:
+        continue
+      end_tss = [ep["end_timestep"] for ep in ep_infos]
+      rets = [ep["return"] for ep in ep_infos]
+      y = np.full(total_timesteps, np.nan)
+      prev_ts = 0
+      last_ret = 0.0
+      for k in range(len(rets)):
+        end_idx = min(end_tss[k], total_timesteps)
+        y[prev_ts:end_idx] = last_ret
+        last_ret = rets[k]
+        prev_ts = end_idx
+      y[prev_ts : min(prev_ts + (total_timesteps - prev_ts), total_timesteps)] = last_ret
+      ys.append(y)
+    if not ys:
+      downsampled[variant] = (np.full(num_downsampled, np.nan), np.full(num_downsampled, np.nan))
+      continue
+    ys_np = np.array(ys)
+    mean_y = np.full(num_downsampled, np.nan)
+    std_y = np.full(num_downsampled, np.nan)
+    for k in range(num_downsampled):
+      start = k * downsample_factor
+      end = min((k + 1) * downsample_factor, total_timesteps)
+      per_run_window_means = [np.nanmean(y_run[start:end]) for y_run in ys_np if not np.all(np.isnan(y_run[start:end]))]
+      if per_run_window_means:
+        mean_y[k] = np.mean(per_run_window_means)
+        std_y[k] = np.std(per_run_window_means) if len(per_run_window_means) > 1 else 0.0
+    downsampled[variant] = (mean_y, std_y)
+    del ys_np
+  return downsampled
+
+
+def compute_downsampled_entropies(variant_names, episode_entropies_lists, total_timesteps, downsample_factor, timesteps_np, per_run_lists=None):
+  timesteps_np = np.array(timesteps_np)
+  downsampled = {}
+  num_downsampled = len(timesteps_np)
+  for v_idx, variant in enumerate(variant_names):
+    num_variant_runs = len(episode_entropies_lists[v_idx])
+    if num_variant_runs == 0:
+      downsampled[variant] = (np.full(num_downsampled, np.nan), np.full(num_downsampled, np.nan))
+      continue
+    ys = []
+    for r in range(num_variant_runs):
+      entropies = episode_entropies_lists[v_idx][r]
+      run_total_ts = per_run_lists[v_idx][r] if per_run_lists is not None else total_timesteps
+      if not entropies:
+        continue
+      num_updates = len(entropies)
+      step_size = run_total_ts / num_updates if num_updates > 0 else 0
+      end_tss = [int((k + 1) * step_size) for k in range(num_updates)]
+      y = np.full(total_timesteps, np.nan)
+      prev_ts = 0
+      for k in range(num_updates):
+        end_idx = min(end_tss[k], total_timesteps)
+        y[prev_ts:end_idx] = entropies[k]
+        prev_ts = end_idx
+      if prev_ts < total_timesteps and entropies:
+        y[prev_ts:] = entropies[-1]
+      ys.append(y)
+    if not ys:
+      downsampled[variant] = (np.full(num_downsampled, np.nan), np.full(num_downsampled, np.nan))
+      continue
+    ys_np = np.array(ys)
+    mean_y = np.full(num_downsampled, np.nan)
+    std_y = np.full(num_downsampled, np.nan)
+    for k in range(num_downsampled):
+      start = k * downsample_factor
+      end = min((k + 1) * downsample_factor, total_timesteps)
+      per_run_window_means = [np.nanmean(y_run[start:end]) for y_run in ys_np if not np.all(np.isnan(y_run[start:end]))]
+      if per_run_window_means:
+        mean_y[k] = np.mean(per_run_window_means)
+        std_y[k] = np.std(per_run_window_means) if len(per_run_window_means) > 1 else 0.0
+    downsampled[variant] = (mean_y, std_y)
+    del ys_np
+  return downsampled
 
 
 def compute_episode_auc(run_eps, run_total_ts):
@@ -356,9 +550,7 @@ def smooth_data(data, window_size):
 def plot_episode_rewards(
   indices,
   variant_names,
-  episode_lists,
-  total_timesteps,
-  downsample_factor,
+  downsampled_episodes,
   timesteps_np,
   color_map,
   perf_dict,
@@ -367,7 +559,7 @@ def plot_episode_rewards(
   title,
   disable_smoothing=False,
 ):
-  plt.figure(figsize=(20, 10))
+  plt.figure(figsize=FIG_SIZE)
   ax = plt.gca()
   ax.set_facecolor("gainsboro")
   ax.grid(True, color="darkgrey", linestyle=":")
@@ -377,280 +569,18 @@ def plot_episode_rewards(
   all_mins = []
   all_maxs = []
   linewidth = 2.5
+  num_downsampled = len(timesteps_np)
+  window_size = max(3, int(num_downsampled * 0.005))  # Reduced to 0.5% for even less aggressive smoothing
   for i, idx in enumerate(indices):
-    num_variant_runs = len(episode_lists[idx])
-    if num_variant_runs == 0:
+    variant = variant_names[idx]
+    mean_y, std_y = downsampled_episodes.get(variant, (np.full(num_downsampled, np.nan), np.full(num_downsampled, np.nan)))
+    if np.all(np.isnan(mean_y)):
       continue
-    ys = []
-    for run in range(num_variant_runs):
-      ep_infos = episode_lists[idx][run]
-      if not ep_infos:
-        continue
-      end_tss = [ep["end_timestep"] for ep in ep_infos]
-      rets = [ep["return"] for ep in ep_infos]
-      y = np.full(total_timesteps, np.nan)
-      prev_ts = 0
-      last_ret = 0.0
-      for k in range(len(rets)):
-        end_idx = min(end_tss[k], total_timesteps)
-        y[prev_ts:end_idx] = last_ret
-        last_ret = rets[k]
-        prev_ts = end_idx
-      y[prev_ts : min(prev_ts + (total_timesteps - prev_ts), total_timesteps)] = last_ret
-      ys.append(y)
-    if ys:
-      ys_np = np.array(ys)
-      # Compute downsampled mean_y and std_y from real data with per-run window averages
-      num_downsampled = len(timesteps_np)
-      mean_y = np.full(num_downsampled, np.nan)
-      std_y = np.full(num_downsampled, np.nan)
-      for k in range(num_downsampled):
-        start = k * downsample_factor
-        end = min((k + 1) * downsample_factor, total_timesteps)
-        per_run_window_means = []
-        for y_run in ys:
-          window_data = y_run[start:end]
-          if np.all(np.isnan(window_data)):
-            continue
-          per_run_window_means.append(np.nanmean(window_data))
-        if per_run_window_means:
-          mean_y[k] = np.mean(per_run_window_means)
-          std_y[k] = np.std(per_run_window_means) if len(per_run_window_means) > 1 else 0.0
-      window_size = max(1, 25000 // downsample_factor)
-      if disable_smoothing:
-        smoothed_mean_y = mean_y
-      else:
-        smoothed_mean_y = smooth_data(mean_y, window_size)
-      label = variant_names[idx]
-      color = color_map[label]
-      plt.plot(timesteps_np, smoothed_mean_y, label=label, color=color, linewidth=linewidth)
-      sparse_step = max(1, len(timesteps_np) // 20)
-      x_sparse = timesteps_np[::sparse_step]
-      mean_sparse = mean_y[::sparse_step]
-      std_sparse_list = []
-      for k in range(len(x_sparse)):
-        start = k * sparse_step
-        end = min((k + 1) * sparse_step, len(std_y))
-        avg_std = np.mean(std_y[start:end]) if end > start else std_y[start]
-        std_sparse_list.append(avg_std)
-      std_sparse = np.array(std_sparse_list)
-      plt.errorbar(
-        x_sparse,
-        mean_sparse,
-        yerr=std_sparse,
-        fmt="none",
-        ecolor=color,
-        elinewidth=linewidth,
-        capsize=5,
-        uplims=False,
-        lolims=False,
-        errorevery=(i, num_variants),
-      )
-      all_mins.append(np.nanmin(smoothed_mean_y - std_y))
-      all_maxs.append(np.nanmax(smoothed_mean_y + std_y))
-      del ys_np
-
-  if all_mins and all_maxs:
-    global_min = np.nanmin(all_mins)
-    global_max = np.nanmax(all_maxs)
-    padding = (global_max - global_min) * 0.05
-    ax.set_ylim(global_min - padding, global_max + padding)
-
-  handles, labels = plt.gca().get_legend_handles_labels()
-  sorted_indices = sorted(range(len(labels)), key=lambda i: labels[i].lower())
-  handles = [handles[i] for i in sorted_indices]
-  labels = [labels[i] for i in sorted_indices]
-
-  plt.xlabel("timesteps")
-  plt.ylabel("returns")
-  plt.title(title)
-  plt.legend(handles, labels, loc="upper left", facecolor="gainsboro")
-  plt.savefig(os.path.join(compare_dir, filename))
-  plt.close()
-
-
-def plot_episode_entropies(
-  indices,
-  variant_names,
-  episode_entropies_lists,
-  per_run_total_steps,
-  total_timesteps,
-  downsample_factor,
-  timesteps_np,
-  color_map,
-  perf_dict,
-  compare_dir,
-  filename,
-  title,
-  disable_smoothing=False,
-):
-  plt.figure(figsize=(20, 10))
-  ax = plt.gca()
-  ax.set_facecolor("gainsboro")
-  ax.grid(True, color="darkgrey", linestyle=":")
-  for spine in ax.spines.values():
-    spine.set_edgecolor("darkgrey")
-  has_data = False
-  num_variants = len(indices)
-  all_mins = []
-  all_maxs = []
-  linewidth = 2.5
-  for i, idx in enumerate(indices):
-    num_variant_runs = len(episode_entropies_lists[idx])
-    if num_variant_runs == 0:
-      continue
-    ys = []
-    for r in range(num_variant_runs):
-      entropies = episode_entropies_lists[idx][r]
-      run_total_ts = per_run_total_steps[idx][r]
-      if not entropies:
-        continue
-      num_updates = len(entropies)
-      step_size = run_total_ts / num_updates if num_updates > 0 else 0
-      end_tss = [int((k + 1) * step_size) for k in range(num_updates)]
-      y = np.full(total_timesteps, np.nan)
-      prev_ts = 0
-      for k in range(num_updates):
-        end_idx = min(end_tss[k], total_timesteps)
-        y[prev_ts:end_idx] = entropies[k]
-        prev_ts = end_idx
-      if prev_ts < total_timesteps and entropies:
-        y[prev_ts:] = entropies[-1]
-      ys.append(y)
-    if ys:
-      ys_np = np.array(ys)
-      # Compute downsampled mean_y and std_y from real data with per-run window averages
-      num_downsampled = len(timesteps_np)
-      mean_y = np.full(num_downsampled, np.nan)
-      std_y = np.full(num_downsampled, np.nan)
-      for k in range(num_downsampled):
-        start = k * downsample_factor
-        end = min((k + 1) * downsample_factor, total_timesteps)
-        per_run_window_means = []
-        for y_run in ys:
-          window_data = y_run[start:end]
-          if np.all(np.isnan(window_data)):
-            continue
-          per_run_window_means.append(np.nanmean(window_data))
-        if per_run_window_means:
-          mean_y[k] = np.mean(per_run_window_means)
-          std_y[k] = np.std(per_run_window_means) if len(per_run_window_means) > 1 else 0.0
-      if np.all(np.isnan(mean_y)):
-        continue
-      has_data = True
-      window_size = max(1, 25000 // downsample_factor)
-      if disable_smoothing:
-        smoothed_mean_y = mean_y
-      else:
-        smoothed_mean_y = smooth_data(mean_y, window_size)
-      label = variant_names[idx]
-      color = color_map[label]
-      plt.plot(timesteps_np, smoothed_mean_y, label=label, color=color, linewidth=linewidth)
-      sparse_step = max(1, len(timesteps_np) // 20)
-      x_sparse = timesteps_np[::sparse_step]
-      mean_sparse = mean_y[::sparse_step]
-      std_sparse_list = []
-      for k in range(len(x_sparse)):
-        start = k * sparse_step
-        end = min((k + 1) * sparse_step, len(std_y))
-        avg_std = np.mean(std_y[start:end]) if end > start else std_y[start]
-        std_sparse_list.append(avg_std)
-      std_sparse = np.array(std_sparse_list)
-      plt.errorbar(
-        x_sparse,
-        mean_sparse,
-        yerr=std_sparse,
-        fmt="none",
-        ecolor=color,
-        elinewidth=linewidth,
-        capsize=5,
-        uplims=False,
-        lolims=False,
-        errorevery=(i, num_variants),
-      )
-      all_mins.append(np.nanmin(smoothed_mean_y - std_y))
-      all_maxs.append(np.nanmax(smoothed_mean_y + std_y))
-      del ys_np
-
-  if has_data and all_mins and all_maxs:
-    global_min = np.nanmin(all_mins)
-    global_max = np.nanmax(all_maxs)
-    padding = (global_max - global_min) * 0.05
-    ax.set_ylim(global_min - padding, global_max + padding)
-
-  if not has_data:
-    plt.text(0.5, 0.5, "No Entropy Data", ha="center", va="center", fontsize=20)
-  else:
-    handles, labels = plt.gca().get_legend_handles_labels()
-    sorted_indices = sorted(range(len(labels)), key=lambda i: labels[i].lower())
-    handles = [handles[i] for i in sorted_indices]
-    labels = [labels[i] for i in sorted_indices]
-    plt.legend(handles, labels, loc="upper left", facecolor="darkgrey")
-
-  plt.xlabel("timesteps")
-  plt.ylabel("entropy")
-  plt.title(title)
-  plt.savefig(os.path.join(compare_dir, filename))
-  plt.close()
-
-
-def plot_step_rewards(
-  indices,
-  variant_names,
-  step_rewards_lists,
-  total_timesteps,
-  downsample_factor,
-  timesteps_np,
-  color_map,
-  perf_dict,
-  compare_dir,
-  filename,
-  title,
-  disable_smoothing=False,
-):
-  plt.figure(figsize=(20, 10))
-  ax = plt.gca()
-  ax.set_facecolor("gainsboro")
-  ax.grid(True, color="darkgrey", linestyle=":")
-  for spine in ax.spines.values():
-    spine.set_edgecolor("darkgrey")
-  num_variants = len(indices)
-  all_mins = []
-  all_maxs = []
-  linewidth = 2.5
-  for i, idx in enumerate(indices):
-    num_runs = len(step_rewards_lists[idx])
-    if num_runs == 0 or not step_rewards_lists[idx]:
-      continue
-    ys = []
-    for j in range(num_runs):
-      rews = np.array(step_rewards_lists[idx][j])
-      y = np.full(total_timesteps, np.nan, dtype=np.float64)
-      y[: len(rews)] = rews
-      ys.append(y)
-    ys_np = np.array(ys)
-    # Compute downsampled mean_y and std_y from real data with per-run window averages
-    num_downsampled = len(timesteps_np)
-    mean_y = np.full(num_downsampled, np.nan)
-    std_y = np.full(num_downsampled, np.nan)
-    for k in range(num_downsampled):
-      start = k * downsample_factor
-      end = min((k + 1) * downsample_factor, total_timesteps)
-      per_run_window_means = []
-      for y_run in ys:
-        window_data = y_run[start:end]
-        if np.all(np.isnan(window_data)):
-          continue
-        per_run_window_means.append(np.nanmean(window_data))
-      if per_run_window_means:
-        mean_y[k] = np.mean(per_run_window_means)
-        std_y[k] = np.std(per_run_window_means) if len(per_run_window_means) > 1 else 0.0
-    window_size = max(1, 25000 // downsample_factor)
     if disable_smoothing:
       smoothed_mean_y = mean_y
     else:
       smoothed_mean_y = smooth_data(mean_y, window_size)
-    label = variant_names[idx]
+    label = variant
     color = color_map[label]
     plt.plot(timesteps_np, smoothed_mean_y, label=label, color=color, linewidth=linewidth)
     sparse_step = max(1, len(timesteps_np) // 20)
@@ -677,7 +607,171 @@ def plot_step_rewards(
     )
     all_mins.append(np.nanmin(smoothed_mean_y - std_y))
     all_maxs.append(np.nanmax(smoothed_mean_y + std_y))
-    del ys_np
+
+  if all_mins and all_maxs:
+    global_min = np.nanmin(all_mins)
+    global_max = np.nanmax(all_maxs)
+    padding = (global_max - global_min) * 0.05
+    ax.set_ylim(global_min - padding, global_max + padding)
+
+  handles, labels = plt.gca().get_legend_handles_labels()
+  sorted_indices = sorted(range(len(labels)), key=lambda i: labels[i].lower())
+  handles = [handles[i] for i in sorted_indices]
+  labels = [labels[i] for i in sorted_indices]
+
+  plt.xlabel("timesteps")
+  plt.ylabel("returns")
+  plt.title(title)
+  plt.legend(handles, labels, loc="upper left", facecolor="gainsboro")
+  plt.savefig(os.path.join(compare_dir, filename))
+  plt.close()
+
+
+def plot_episode_entropies(
+  indices,
+  variant_names,
+  downsampled_entropies,
+  timesteps_np,
+  color_map,
+  perf_dict,
+  compare_dir,
+  filename,
+  title,
+  disable_smoothing=False,
+):
+  plt.figure(figsize=FIG_SIZE)
+  ax = plt.gca()
+  ax.set_facecolor("gainsboro")
+  ax.grid(True, color="darkgrey", linestyle=":")
+  for spine in ax.spines.values():
+    spine.set_edgecolor("darkgrey")
+  has_data = False
+  num_variants = len(indices)
+  all_mins = []
+  all_maxs = []
+  linewidth = 2.5
+  num_downsampled = len(timesteps_np)
+  window_size = max(3, int(num_downsampled * 0.005))  # Reduced to 0.5% for even less aggressive smoothing
+  for i, idx in enumerate(indices):
+    variant = variant_names[idx]
+    mean_y, std_y = downsampled_entropies.get(variant, (np.full(num_downsampled, np.nan), np.full(num_downsampled, np.nan)))
+    if np.all(np.isnan(mean_y)):
+      continue
+    has_data = True
+    if disable_smoothing:
+      smoothed_mean_y = mean_y
+    else:
+      smoothed_mean_y = smooth_data(mean_y, window_size)
+    label = variant
+    color = color_map[label]
+    plt.plot(timesteps_np, smoothed_mean_y, label=label, color=color, linewidth=linewidth)
+    sparse_step = max(1, len(timesteps_np) // 20)
+    x_sparse = timesteps_np[::sparse_step]
+    mean_sparse = mean_y[::sparse_step]
+    std_sparse_list = []
+    for k in range(len(x_sparse)):
+      start = k * sparse_step
+      end = min((k + 1) * sparse_step, len(std_y))
+      avg_std = np.mean(std_y[start:end]) if end > start else std_y[start]
+      std_sparse_list.append(avg_std)
+    std_sparse = np.array(std_sparse_list)
+    plt.errorbar(
+      x_sparse,
+      mean_sparse,
+      yerr=std_sparse,
+      fmt="none",
+      ecolor=color,
+      elinewidth=linewidth,
+      capsize=5,
+      uplims=False,
+      lolims=False,
+      errorevery=(i, num_variants),
+    )
+    all_mins.append(np.nanmin(smoothed_mean_y - std_y))
+    all_maxs.append(np.nanmax(smoothed_mean_y + std_y))
+
+  if has_data and all_mins and all_maxs:
+    global_min = np.nanmin(all_mins)
+    global_max = np.nanmax(all_maxs)
+    padding = (global_max - global_min) * 0.05
+    ax.set_ylim(global_min - padding, global_max + padding)
+
+  if not has_data:
+    plt.text(0.5, 0.5, "No Entropy Data", ha="center", va="center", fontsize=20)
+  else:
+    handles, labels = plt.gca().get_legend_handles_labels()
+    sorted_indices = sorted(range(len(labels)), key=lambda i: labels[i].lower())
+    handles = [handles[i] for i in sorted_indices]
+    labels = [labels[i] for i in sorted_indices]
+    plt.legend(handles, labels, loc="upper left", facecolor="darkgrey")
+
+  plt.xlabel("timesteps")
+  plt.ylabel("entropy")
+  plt.title(title)
+  plt.savefig(os.path.join(compare_dir, filename))
+  plt.close()
+
+
+def plot_step_rewards(
+  indices,
+  variant_names,
+  downsampled_steps,
+  timesteps_np,
+  color_map,
+  perf_dict,
+  compare_dir,
+  filename,
+  title,
+  disable_smoothing=False,
+):
+  plt.figure(figsize=FIG_SIZE)
+  ax = plt.gca()
+  ax.set_facecolor("gainsboro")
+  ax.grid(True, color="darkgrey", linestyle=":")
+  for spine in ax.spines.values():
+    spine.set_edgecolor("darkgrey")
+  num_variants = len(indices)
+  all_mins = []
+  all_maxs = []
+  linewidth = 2.5
+  num_downsampled = len(timesteps_np)
+  window_size = max(3, int(num_downsampled * 0.005))  # Reduced to 0.5% for even less aggressive smoothing
+  for i, idx in enumerate(indices):
+    variant = variant_names[idx]
+    mean_y, std_y = downsampled_steps.get(variant, (np.full(num_downsampled, np.nan), np.full(num_downsampled, np.nan)))
+    if np.all(np.isnan(mean_y)):
+      continue
+    if disable_smoothing:
+      smoothed_mean_y = mean_y
+    else:
+      smoothed_mean_y = smooth_data(mean_y, window_size)
+    label = variant
+    color = color_map[label]
+    plt.plot(timesteps_np, smoothed_mean_y, label=label, color=color, linewidth=linewidth)
+    sparse_step = max(1, len(timesteps_np) // 20)
+    x_sparse = timesteps_np[::sparse_step]
+    mean_sparse = mean_y[::sparse_step]
+    std_sparse_list = []
+    for k in range(len(x_sparse)):
+      start = k * sparse_step
+      end = min((k + 1) * sparse_step, len(std_y))
+      avg_std = np.mean(std_y[start:end]) if end > start else std_y[start]
+      std_sparse_list.append(avg_std)
+    std_sparse = np.array(std_sparse_list)
+    plt.errorbar(
+      x_sparse,
+      mean_sparse,
+      yerr=std_sparse,
+      fmt="none",
+      ecolor=color,
+      elinewidth=linewidth,
+      capsize=5,
+      uplims=False,
+      lolims=False,
+      errorevery=(i, num_variants),
+    )
+    all_mins.append(np.nanmin(smoothed_mean_y - std_y))
+    all_maxs.append(np.nanmax(smoothed_mean_y + std_y))
 
   if all_mins and all_maxs:
     global_min = np.nanmin(all_mins)
@@ -699,7 +793,7 @@ def plot_step_rewards(
 
 
 def plot_inference_bar(variant_names, variant_names_list, inference_means_lists, inference_stds_lists, color_map, compare_dir, filename, title):
-  plt.figure(figsize=(10, 6))
+  plt.figure(figsize=FIG_SIZE)
   ax = plt.gca()
   ax.set_facecolor("gainsboro")
   ax.grid(True, color="darkgrey", linestyle=":")
@@ -732,7 +826,7 @@ def plot_inference_bar(variant_names, variant_names_list, inference_means_lists,
 def plot_scatter_variations(perfs, compare_dir, filename, title):
   if len(perfs) < 2:
     return
-  plt.figure(figsize=(10, 8))
+  plt.figure(figsize=FIG_SIZE)
   ax = plt.gca()
   ax.set_facecolor("gainsboro")
   ax.grid(True, color="darkgrey", linestyle=":")
@@ -811,6 +905,7 @@ def generate_report(model_performances, env_id):
 
 def report(compare_dir, env_id, disable_downsampling=False, disable_smoothing=False):
   print(f"Generating report for experiments in {compare_dir} on environment {env_id}...")
+  all_files = [f for f in os.listdir(compare_dir) if f.endswith(".pkl") and "_run" in f]
   variant_dict = load_data(compare_dir)
   print(f"Found variants: {len(variant_dict)}")
 
@@ -826,6 +921,45 @@ def report(compare_dir, env_id, disable_downsampling=False, disable_smoothing=Fa
 
   # Collect per_run_total_steps for entropy plotting
   per_run_total_steps = [[len(run_data["step_rewards"]) for _, run_data in sorted(variant_dict[variant])] for variant in sorted(variant_dict.keys())]
+
+  downsampled_steps = get_downsampled_incremental(
+    compare_dir,
+    all_files,
+    "cache_downsampled_steps.bin",
+    variant_names,
+    compute_downsampled_steps,
+    step_rewards_lists,
+    total_timesteps,
+    downsample_factor,
+    timesteps_np,
+    per_run_lists=None,
+  )
+
+  downsampled_episodes = get_downsampled_incremental(
+    compare_dir,
+    all_files,
+    "cache_downsampled_episodes.bin",
+    variant_names,
+    compute_downsampled_episodes,
+    episode_lists,
+    total_timesteps,
+    downsample_factor,
+    timesteps_np,
+    per_run_lists=None,
+  )
+
+  downsampled_entropies = get_downsampled_incremental(
+    compare_dir,
+    all_files,
+    "cache_downsampled_entropies.bin",
+    variant_names,
+    compute_downsampled_entropies,
+    episode_entropies_lists,
+    total_timesteps,
+    downsample_factor,
+    timesteps_np,
+    per_run_lists=per_run_total_steps,
+  )
 
   model_performances = compute_model_performances(
     variant_names, step_rewards_lists, episode_lists, episode_entropies_lists, inference_means_lists, inference_stds_lists
@@ -848,27 +982,10 @@ def report(compare_dir, env_id, disable_downsampling=False, disable_smoothing=Fa
 
   perf_dict = {perf["variant"]: perf["avg_auc_episode"] for perf in model_performances}
 
-  # plot_step_rewards(
-  #   top_indices,
-  #   variant_names,
-  #   step_rewards_lists,
-  #   total_timesteps,
-  #   downsample_factor,
-  #   timesteps_np,
-  #   color_map,
-  #   perf_dict,
-  #   compare_dir,
-  #   "step_plot.png",
-  #   f"{env_id}",
-  #   disable_smoothing=disable_smoothing,
-  # )
-
   plot_episode_rewards(
     top_indices,
     variant_names,
-    episode_lists,
-    total_timesteps,
-    downsample_factor,
+    downsampled_episodes,
     timesteps_np,
     color_map,
     perf_dict,
@@ -881,10 +998,7 @@ def report(compare_dir, env_id, disable_downsampling=False, disable_smoothing=Fa
   plot_episode_entropies(
     top_indices,
     variant_names,
-    episode_entropies_lists,
-    per_run_total_steps,
-    total_timesteps,
-    downsample_factor,
+    downsampled_entropies,
     timesteps_np,
     color_map,
     perf_dict,
@@ -910,9 +1024,7 @@ def report(compare_dir, env_id, disable_downsampling=False, disable_smoothing=Fa
     plot_episode_rewards(
       trpor_noise_indices,
       variant_names,
-      episode_lists,
-      total_timesteps,
-      downsample_factor,
+      downsampled_episodes,
       timesteps_np,
       color_map,
       perf_dict,
@@ -927,9 +1039,7 @@ def report(compare_dir, env_id, disable_downsampling=False, disable_smoothing=Fa
     plot_episode_rewards(
       trpo_noise_indices,
       variant_names,
-      episode_lists,
-      total_timesteps,
-      downsample_factor,
+      downsampled_episodes,
       timesteps_np,
       color_map,
       perf_dict,
@@ -944,9 +1054,7 @@ def report(compare_dir, env_id, disable_downsampling=False, disable_smoothing=Fa
     plot_episode_rewards(
       best_vs_trpo_indices,
       variant_names,
-      episode_lists,
-      total_timesteps,
-      downsample_factor,
+      downsampled_episodes,
       timesteps_np,
       color_map,
       perf_dict,
@@ -961,9 +1069,7 @@ def report(compare_dir, env_id, disable_downsampling=False, disable_smoothing=Fa
     plot_episode_rewards(
       best_trpor_vs_equiv_indices,
       variant_names,
-      episode_lists,
-      total_timesteps,
-      downsample_factor,
+      downsampled_episodes,
       timesteps_np,
       color_map,
       perf_dict,
@@ -984,9 +1090,7 @@ def report(compare_dir, env_id, disable_downsampling=False, disable_smoothing=Fa
     plot_episode_rewards(
       trpor_best_worst_indices,
       variant_names,
-      episode_lists,
-      total_timesteps,
-      downsample_factor,
+      downsampled_episodes,
       timesteps_np,
       color_map,
       perf_dict,
@@ -1011,9 +1115,7 @@ def report(compare_dir, env_id, disable_downsampling=False, disable_smoothing=Fa
     plot_episode_rewards(
       trpo_best_worst_indices,
       variant_names,
-      episode_lists,
-      total_timesteps,
-      downsample_factor,
+      downsampled_episodes,
       timesteps_np,
       color_map,
       perf_dict,
@@ -1040,29 +1142,30 @@ if __name__ == "__main__":
   mpl.rcParams.update(
     {
       "font.family": "monospace",
-      "font.size": 12,
-      "axes.labelsize": 12,
-      "axes.titlesize": 14,
-      "legend.fontsize": 10,
-      "xtick.labelsize": 10,
-      "ytick.labelsize": 10,
+      "font.size": 24,
+      "axes.labelsize": 14,
+      "axes.titlesize": 19,
+      "legend.fontsize": 14,
+      "xtick.labelsize": 14,
+      "ytick.labelsize": 14,
       "axes.grid": True,
       "grid.color": "gainsboro",
       "grid.alpha": 0.5,
     }
   )
 
-  disable_downsampling = True
-  disable_smoothing = True
+  disable_downsampling = False
+  disable_smoothing = False
 
-  base_compare_dir = "assets1"
-  subdirs = sorted(os.listdir(base_compare_dir))
-  print("# Table of Contents")
-  for subdir in subdirs:
-    env_id = subdir.split("_")[0].lower()
-    print(f"- [{env_id}](#model-performance-report-for-{env_id})")
-  print("")
-  for subdir in subdirs:
-    env_id = subdir.split("_")[0]
-    compare_dir = os.path.join(base_compare_dir, subdir)
-    report(compare_dir, env_id, disable_downsampling, disable_smoothing)
+  base_compare_dirs = ["assets1"]
+  for base_compare_dir in base_compare_dirs:
+    subdirs = sorted(os.listdir(base_compare_dir))
+    print("# Table of Contents")
+    for subdir in subdirs:
+      env_id = subdir.split("_")[0].lower()
+      print(f"- [{env_id}](#model-performance-report-for-{env_id})")
+    print("")
+    for subdir in subdirs:
+      env_id = subdir.split("_")[0]
+      compare_dir = os.path.join(base_compare_dir, subdir)
+      report(compare_dir, env_id, disable_downsampling, disable_smoothing)

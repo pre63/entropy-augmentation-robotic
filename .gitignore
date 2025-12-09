@@ -212,6 +212,7 @@ __marimo__/
 assets/**/*.zip
 assets/**/*.pkl
 assets/**/*.mp4
+assets/**/*.bin
 
 reports/tmp
 reports/*.log
@@ -223,3 +224,4 @@ tree
 assets1/**/*.zip
 assets1/**/*.pkl
 assets1/**/*.mp4
+assets1/**/*.bin

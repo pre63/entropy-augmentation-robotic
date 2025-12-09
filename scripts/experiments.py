@@ -71,7 +71,7 @@ def make_video_env(env_id, noise_configs=None):
   return env
 
 
-def record_best_model_video(variant_name, Variant, compare_dir, env_id, noise_configs=None):
+def record_best_model_video(variant_name, Variant, compare_dir, env_id, noise_configs=None, num_runs=100):
   max_reward = -float("inf")
   best_run = None
   for run in range(num_runs):
@@ -186,43 +186,47 @@ if __name__ == "__main__":
 
   # Experimentation schedule
 
-  # 1M timesteps is sufficient to see the trends in performance for these environments, sampling oonger runs 2M, 10M has not shown significant changes in trend
+  # 1M timesteps is sufficient to see the trends in performance for these environments, sampling longer runs 2M, 10M has not shown significant changes in trend
   timesteps = 1_000_000
-  # For the lower-dimentionality environments, we can run 100 runs for better statistical significance and smoothing
-  num_runs = 5
 
-  configs = []
-  for i in [None, 0.1, 0.2, -0.1, -0.2]:
-    configs.append(("HalfCheetah-v5", TRPOR, i))
-    configs.append(("HalfCheetah-v5", TRPO, i))
-    configs.append(("Hopper-v5", TRPOR, i))
-    configs.append(("Hopper-v5", TRPO, i))
-    configs.append(("Swimmer-v5", TRPOR, i))
-    configs.append(("Swimmer-v5", TRPO, i))
+  # Define environments and parameters
+  low_dim_envs = ["HalfCheetah-v5", "Hopper-v5", "Swimmer-v5"]
+  humanoid_envs = ["Humanoid-v5", "HumanoidStandup-v5"]
+  all_envs = low_dim_envs + humanoid_envs
+  algos = [TRPOR, TRPO]
+  preferred_noises = [None, 0.1, 0.2, -0.1, -0.2]  # Emphasizing None as a preferred config
+  ancillary_noises = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, -0.3, -0.4, -0.5, -0.6, -0.7, -0.8, -0.9, -1.0]
 
-  run_experiment(configs, n_envs, timesteps, num_runs, n_eval_episodes)
+  # Assign target runs
+  from collections import defaultdict
 
-  # Humanoid experiments runs=20 given that the time per run is much higher
-  for i in [None, 0.1, 0.2, -0.1, -0.2]:
-    configs.append(("Humanoid-v5", TRPO, i))
-    configs.append(("Humanoid-v5", TRPOR, i))
-    configs.append(("HumanoidStandup-v5", TRPOR, i))
-    configs.append(("HumanoidStandup-v5", TRPO, i))
+  target_runs = defaultdict(int)
 
-  run_experiment(configs, n_envs, timesteps, num_runs, n_eval_episodes)
+  # All configs start with at least 5 runs
+  min_runs = 5
 
-  # Full exploration of the noise hyperparameter, but fewer runs since these are more anciliary, given that we know that -0.2 to 0.2 provides best results
-  num_runs = 5
-  for i in [None, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, -0.3, -0.4, -0.5, -0.6, -0.7, -0.8, -0.9, -1.0]:
-    configs.append(("HalfCheetah-v5", TRPOR, i))
-    configs.append(("HalfCheetah-v5", TRPO, i))
-    configs.append(("Hopper-v5", TRPOR, i))
-    configs.append(("Hopper-v5", TRPO, i))
-    configs.append(("Swimmer-v5", TRPOR, i))
-    configs.append(("Swimmer-v5", TRPO, i))
-    configs.append(("Humanoid-v5", TRPO, i))
-    configs.append(("Humanoid-v5", TRPOR, i))
-    configs.append(("HumanoidStandup-v5", TRPOR, i))
-    configs.append(("HumanoidStandup-v5", TRPO, i))
+  # Preferred configs (including None) for low-dim envs: up to 100 runs
+  for env in low_dim_envs:
+    for algo in algos:
+      for noise in preferred_noises:
+        target_runs[(env, algo, noise)] = 100
 
-  run_experiment(configs, n_envs, timesteps, num_runs, n_eval_episodes)
+  # Preferred configs (including None) for humanoid envs: up to 20 runs
+  for env in humanoid_envs:
+    for algo in algos:
+      for noise in preferred_noises:
+        target_runs[(env, algo, noise)] = 20
+
+  # Ancillary noises for all envs: 5 runs
+  for env in all_envs:
+    for algo in algos:
+      for noise in ancillary_noises:
+        target_runs[(env, algo, noise)] = 5
+
+  # Progressively gather runs: first 5 for all, then add to preferred, stop humanoid at 20, continue low-dim to 100
+  max_runs = max(target_runs.values())
+  for current_run in range(max_runs):
+    current_configs = [conf for conf, targ in target_runs.items() if current_run < targ]
+    print(f"Starting experiments for run {current_run + 1}/{max_runs} with {len(current_configs)} configurations.")
+    if current_configs:
+      run_experiment(current_configs, n_envs, timesteps, num_runs=1, n_eval_episodes=n_eval_episodes)
