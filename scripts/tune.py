@@ -43,16 +43,6 @@ def train_and_evaluate(env_id, ent_coef, n_envs, total_timesteps, n_eval_episode
   return mean_reward, std_reward
 
 
-# def print_report(results):
-#   # Print optimal ent_coef for each env and noise level
-#   print("\nOptimal ent_coef for each environment and noise level:")
-#   for noise_level in sorted(results.keys()):
-#     print(f"\nNoise level: {noise_level}")
-#     for env_id in sorted(results[noise_level].keys()):
-#       best_ent_coef, best_mean, best_std = results[noise_level][env_id]
-#       print(f"  {env_id}: {best_ent_coef} (mean: {best_mean:.2f}, std: {best_std:.2f})")
-
-
 # Define print_report to group by env, compute mean/std of means, sort by mean desc
 def print_report(results):
   for env_id in results:
@@ -71,12 +61,12 @@ def print_report(results):
       print(f"{noise_str} | {coef} | {m:.2f} | {s:.2f} | {n}")
 
 
-envs = ["HalfCheetah-v5", "Hopper-v5", "Swimmer-v5", "Humanoid-v5", "HumanoidStandup-v5"]
+envs = ["HalfCheetah-v5", "Hopper-v5", "Swimmer-v5", "Walker2d-v5", "Humanoid-v5", "HumanoidStandup-v5"]
 ent_coefs = sorted(
   set(
     [
+      0.0,
       0.00001,
-      0.00005,
       0.0001,
       0.0002,
       0.0003,
@@ -97,17 +87,8 @@ ent_coefs = sorted(
       0.009,
       0.01,
       0.02,
-      0.03,
-      0.04,
-      0.05,
-      0.06,
-      0.07,
       0.08,
-      0.09,
       0.1,
-      0.2,
-      0.3,
-      0.4,
       0.5,
     ]
   )
@@ -117,141 +98,53 @@ if __name__ == "__main__":
   dry_run = False  # Set to True for quick testing
 
   n_envs = 12
-  total_timesteps = 2 if dry_run else 1_000_000
-  n_eval_episodes = 1 if dry_run else 20
+  total_timesteps = 1_000_000
+  n_eval_episodes = 20
+  noise_levels = [0.1]
+  n_eval_runs = 3
 
   results = {}  # env -> {(noise, ent_coef): {"means": [], "stds": []}}
 
-  # Pre-selected top 4 ent_coefs for HalfCheetah, Hopper, Swimmer at noise=0.1
-  selected_coefs = {
-    "HalfCheetah-v5": [0.0002, 0.005, 0.00005, 0.0003],
-    "Hopper-v5": [0.007, 0.0005, 0.009, 0.0003],
-    "Swimmer-v5": [0.009, 0.007, 0.006, 0.03],
-  }
-
-  # if dry_run: use only one ent_coef per env for quick testing
-  if dry_run:
-    for env_id in selected_coefs:
-      selected_coefs[env_id] = [selected_coefs[env_id][0]]
-
-  # For HalfCheetah, Hopper, Swimmer: 10 runs each for the 4 selected ent_coefs at noise=0.1
-  for env_id in ["HalfCheetah-v5", "Hopper-v5", "Swimmer-v5"]:
-    if env_id not in results:
-      results[env_id] = {}
-    noise_level = 0.1
-    for ent_coef in selected_coefs[env_id]:
-      key = (noise_level, ent_coef)
-      results[env_id][key] = {"means": [], "stds": []}
-      for run in range(10):
-        print(f"Evaluating {env_id} with ent_coef={ent_coef} and noise={noise_level} (run {run+1}/10)")
-        mean_reward, std_reward = train_and_evaluate(env_id, ent_coef, n_envs, total_timesteps, n_eval_episodes, noise_level)
-        results[env_id][key]["means"].append(mean_reward)
-        results[env_id][key]["stds"].append(std_reward)
-        # Print result as we go
-        print(f"  Result for run {run+1}: mean: {mean_reward:.2f}, std: {std_reward:.2f}")
-        # Compute and print running average
-        running_means = results[env_id][key]["means"]
-        running_avg = np.mean(running_means)
-        running_std_of_means = np.std(running_means) if len(running_means) > 1 else 0.0
-        print(f"  Running average after {run+1} runs: mean: {running_avg:.2f}, std of means: {running_std_of_means:.2f}")
-
-  print_report(results)
-
-  # if sry run only one ent_coef per humanoid env for quick testing
   if dry_run:
     ent_coefs = [0.0002]
+    noise_levels = [0.1]
+    total_timesteps = 2
+    n_eval_episodes = 1
 
-  # For Humanoid and HumanoidStandup: 1 run each for full ent_coefs at noise=0.1 and 0.2
-  humanoid_envs = ["Humanoid-v5", "HumanoidStandup-v5"]
-  noise_levels_humanoid = [0.1, 0.2]
-  if dry_run:
-    noise_levels_humanoid = [0.1]
-
-  for env_id in humanoid_envs:
-    if env_id not in results:
-      results[env_id] = {}
-    for noise_level in noise_levels_humanoid:
+  for env_id in envs:
+    results[env_id] = {}
+    for noise_level in noise_levels:
       for ent_coef in ent_coefs:
-        key = (noise_level, ent_coef)
-        results[env_id][key] = {"means": [], "stds": []}
-        print(f"Evaluating {env_id} with ent_coef={ent_coef} and noise={noise_level} (initial run)")
-        mean_reward, std_reward = train_and_evaluate(env_id, ent_coef, n_envs, total_timesteps, n_eval_episodes, noise_level)
-        results[env_id][key]["means"].append(mean_reward)
-        results[env_id][key]["stds"].append(std_reward)
-        # Print result as we go
-        print(f"  Result: mean: {mean_reward:.2f}, std: {std_reward:.2f}")
+        for run in range(n_eval_runs):
+          key = (noise_level, ent_coef)
+          results[env_id][key] = {"means": [], "stds": []}
+          print(f"Evaluating {env_id} with ent_coef={ent_coef} and noise={noise_level} (initial run)")
+          mean_reward, std_reward = train_and_evaluate(env_id, ent_coef, n_envs, total_timesteps, n_eval_episodes, noise_level)
+          results[env_id][key]["means"].append(mean_reward)
+          results[env_id][key]["stds"].append(std_reward)
+          print(f"  Result: mean: {mean_reward:.2f}, std: {std_reward:.2f}")
 
   print_report(results)
 
-  # Select top 4 configs (noise, ent_coef) per humanoid env based on initial mean, add 9 more runs each
-  for env_id in humanoid_envs:
+  for env_id in envs:
     config_means = []
     for key in results[env_id]:
-      initial_mean = results[env_id][key]["means"][0]  # Since only 1 run so far
+      initial_mean = results[env_id][key]["means"][0]
       config_means.append((key, initial_mean))
     sorted_configs = sorted(config_means, key=lambda x: x[1], reverse=True)
     top_4 = sorted_configs[:4]
-    for (noise_level, ent_coef), _ in top_4:
-      key = (noise_level, ent_coef)
-      for run in range(1, 10):  # 9 more runs
-        print(f"Evaluating {env_id} with ent_coef={ent_coef} and noise={noise_level} (additional run {run}/9)")
+    for key, _ in top_4:
+      noise_level, ent_coef = key
+      num_additional_runs = 1 if dry_run else 7
+      for run in range(num_additional_runs):
+        print(f"Evaluating {env_id} with ent_coef={ent_coef} and noise={noise_level} (additional run {run+1}/{num_additional_runs})")
         mean_reward, std_reward = train_and_evaluate(env_id, ent_coef, n_envs, total_timesteps, n_eval_episodes, noise_level)
         results[env_id][key]["means"].append(mean_reward)
         results[env_id][key]["stds"].append(std_reward)
-        # Print result as we go
-        print(f"  Result for additional run {run}: mean: {mean_reward:.2f}, std: {std_reward:.2f}")
-        # Compute and print running average
+        print(f"  Result for additional run {run+1}: mean: {mean_reward:.2f}, std: {std_reward:.2f}")
         running_means = results[env_id][key]["means"]
         running_avg = np.mean(running_means)
         running_std_of_means = np.std(running_means) if len(running_means) > 1 else 0.0
-        print(f"  Running average after {run+1} total runs: mean: {running_avg:.2f}, std of means: {running_std_of_means:.2f}")
-
-  print_report(results)
-
-  # For Walker2d: 10 runs each for full sweep of cohefs at 0.1 then 10 for top 4
-  env_id = "Walker2d-v5"
-  results[env_id] = {}
-
-  for noise_level in [0.1]:
-    for ent_coef in ent_coefs:
-      key = (noise_level, ent_coef)
-      results[env_id][key] = {"means": [], "stds": []}
-      for run in range(1):
-        print(f"Evaluating {env_id} with ent_coef={ent_coef} and noise={noise_level} (run {run+1}/10)")
-        mean_reward, std_reward = train_and_evaluate(env_id, ent_coef, n_envs, total_timesteps, n_eval_episodes, noise_level)
-        results[env_id][key]["means"].append(mean_reward)
-        results[env_id][key]["stds"].append(std_reward)
-        # Print result as we go
-        print(f"  Result for run {run+1}: mean: {mean_reward:.2f}, std: {std_reward:.2f}")
-        # Compute and print running average
-        running_means = results[env_id][key]["means"]
-        running_avg = np.mean(running_means)
-        running_std_of_means = np.std(running_means) if len(running_means) > 1 else 0.0
-        print(f"  Running average after {run+1} runs: mean: {running_avg:.2f}, std of means: {running_std_of_means:.2f}")
-
-  print_report(results)
-
-  # Select top 4 configs (noise, ent_coef) for Walker2d based on initial means, add 9 more runs each
-  config_means = []
-  for key in results[env_id]:
-    initial_mean = results[env_id][key]["means"][0]  # Since only 1 run so far
-    config_means.append((key, initial_mean))
-  sorted_configs = sorted(config_means, key=lambda x: x[1], reverse=True)
-  top_4 = sorted_configs[:4]
-
-  for (noise_level, ent_coef), _ in top_4:
-    key = (noise_level, ent_coef)
-    for run in range(1, 10):  # 9 more runs
-      print(f"Evaluating {env_id} with ent_coef={ent_coef} and noise={noise_level} (additional run {run}/9)")
-      mean_reward, std_reward = train_and_evaluate(env_id, ent_coef, n_envs, total_timesteps, n_eval_episodes, noise_level)
-      results[env_id][key]["means"].append(mean_reward)
-      results[env_id][key]["stds"].append(std_reward)
-      # Print result as we go
-      print(f"  Result for additional run {run}: mean: {mean_reward:.2f}, std: {std_reward:.2f}")
-      # Compute and print running average
-      running_means = results[env_id][key]["means"]
-      running_avg = np.mean(running_means)
-      running_std_of_means = np.std(running_means) if len(running_means) > 1 else 0.0
-      print(f"  Running average after {run+1} total runs: mean: {running_avg:.2f}, std of means: {running_std_of_means:.2f}")
+        print(f"  Running average after {len(running_means)} runs: mean: {running_avg:.2f}, std of means: {running_std_of_means:.2f}")
 
   print_report(results)
