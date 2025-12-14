@@ -99,7 +99,7 @@ if __name__ == "__main__":
 
   n_envs = 12
   total_timesteps = 1_000_000
-  n_eval_episodes = 20
+  n_eval_episodes = 100
   noise_levels = [0.1]
   n_eval_runs = 3
 
@@ -123,6 +123,7 @@ if __name__ == "__main__":
           results[env_id][key]["means"].append(mean_reward)
           results[env_id][key]["stds"].append(std_reward)
           print(f"  Result: mean: {mean_reward:.2f}, std: {std_reward:.2f}")
+          print_report(results)
 
   print_report(results)
 
@@ -146,5 +147,6 @@ if __name__ == "__main__":
         running_avg = np.mean(running_means)
         running_std_of_means = np.std(running_means) if len(running_means) > 1 else 0.0
         print(f"  Running average after {len(running_means)} runs: mean: {running_avg:.2f}, std of means: {running_std_of_means:.2f}")
+        print_report(results)
 
   print_report(results)
