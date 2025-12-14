@@ -5,15 +5,15 @@ HalfCheetah-v5: &defaults
   n_steps: 2048
   gamma: 0.99
   gae_lambda: 0.95
-  sub_sampling_factor: 1
+  sub_sampling_factor: 0.5
   cg_max_steps: 5
   cg_damping: 0.1
-  n_critic_updates: 10
-  learning_rate: 0.035
-  target_kl: 0.1
+  n_critic_updates: 5
+  learning_rate: 0.007
+  target_kl: 0.07
   net_arch: small
   activation_fn: tanh
-  ent_coef: 0.0005
+  ent_coef: 0.001
 
 # Tuned
 Hopper-v5:

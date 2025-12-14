@@ -227,3 +227,5 @@ assets*/**/*.pkl
 assets*/**/*.mp4
 assets*/**/*.bin
 ~archive
+~optuna
+.DS_Store

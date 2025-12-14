@@ -67,3 +67,7 @@ tune: fix
 	@touch ~logs/tune
 	@source .venv/bin/activate; \
 	PYTHONPATH=. python -m scripts.tune 2>&1 | tee -a ~logs/tune
+
+optuna: fix
+	@source .venv/bin/activate; \
+	PYTHONPATH=. python -m scripts.optuna 2>&1 | tee -a ~logs/optuna
