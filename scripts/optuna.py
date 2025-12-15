@@ -1,18 +1,50 @@
 import multiprocessing
 import os
+from typing import Optional
 
 import gymnasium as gym
 import numpy as np
 import optuna
 import torch.nn as nn
 from optuna.pruners import MedianPruner
-from optuna.storages import JournalStorage
-from optuna.storages.journal import JournalFileBackend
-from stable_baselines3.common.evaluation import evaluate_policy
-from stable_baselines3.common.monitor import Monitor
+from optuna.storages.journal import JournalFileBackend, JournalStorage
+from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
 
 from sb3.trpor import TRPOR
+
+
+class TrialEvalCallback(EvalCallback):
+  def __init__(
+    self,
+    eval_env,
+    trial: optuna.Trial,
+    n_eval_episodes: int = 10,
+    eval_freq: int = 20000,
+    deterministic: bool = True,
+    verbose: int = 0,
+  ):
+    super().__init__(
+      eval_env=eval_env,
+      n_eval_episodes=n_eval_episodes,
+      eval_freq=eval_freq,
+      deterministic=deterministic,
+      verbose=verbose,
+    )
+    self.trial = trial
+    self.eval_idx = 0
+
+  def _on_step(self) -> bool:
+    if self.eval_freq > 0 and self.n_calls % self.eval_freq == 0:
+      super()._on_step()  # Updates self.last_mean_reward
+
+      self.eval_idx += 1
+      self.trial.report(self.last_mean_reward, self.eval_idx)
+
+      if self.trial.should_prune():
+        raise optuna.TrialPruned()
+
+    return True
 
 
 class ActionNoiseWrapper(gym.ActionWrapper):
@@ -34,91 +66,53 @@ def make_env(env_id, noise_type=None, noise_level=None):
     env = gym.make(env_id)
     if noise_type and noise_level:
       env = ActionNoiseWrapper(env, noise_type, noise_level)
-    env = Monitor(env)
     return env
 
   return _init
 
 
-ent_coef_options = [
-  # 0.0,
-  0.0001,
-  0.0003,
-  0.0005,
-  0.0007,
-  0.0009,
-  0.001,
-  0.003,
-  0.005,
-  0.007,
-  0.009,
-  0.01,
-  0.03,
-  0.05,
-  0.07,
-  0.09,
-  0.1,
-  0.3,
-  0.5,
-  0.7,
-  0.9,
-]
-learning_rate_options = [0.002, 0.003, 0.004, 0.005, 0.007, 0.01, 0.03, 0.07, 0.1, 0.3, 0.5]
-
-
 def suggest_hyperparams(trial):
   params = {}
-  params["ent_coef"] = trial.suggest_categorical("ent_coef", ent_coef_options)
-  params["target_kl"] = trial.suggest_categorical("target_kl", [0.01, 0.03, 0.05, 0.07, 0.1, 0.3, 0.5])
-  params["learning_rate"] = trial.suggest_categorical("learning_rate", learning_rate_options)
+  params["ent_coef"] = trial.suggest_float("ent_coef", 0.0001, 1, log=True)
+  params["target_kl"] = trial.suggest_float("target_kl", 0.01, 0.5, log=True)
+  params["learning_rate"] = trial.suggest_float("learning_rate", 0.001, 0.1, log=True)
   params["sub_sampling_factor"] = trial.suggest_categorical("sub_sampling_factor", [0.1, 0.5, 1.0])
   params["n_critic_updates"] = trial.suggest_categorical("n_critic_updates", [5, 10])
-  params["net_arch_str"] = trial.suggest_categorical("net_arch", ["small", "medium"])
+  params["net_arch_str"] = "small"
   params["gamma"] = 0.99
   params["gae_lambda"] = 0.95
   params["cg_max_steps"] = 5
   params["cg_damping"] = 0.1
-  params["batch_size"] = 512
+  params["batch_size"] = 256
   params["n_steps"] = 2048
   return params
 
 
-def recent_metrics(vec_env, prev_episode_counts, n_envs):
-  current_rewards_lists = vec_env.venv.get_attr("episode_returns")
-  current_lengths_lists = vec_env.venv.get_attr("episode_lengths")
-  recent_rewards = []
-  recent_lengths = []
-  for i in range(n_envs):
-    recent_r = current_rewards_lists[i][prev_episode_counts[i] :]
-    recent_lengths_i = current_lengths_lists[i][prev_episode_counts[i] :]
-    recent_rewards.extend(recent_r)
-    recent_lengths.extend(recent_lengths_i)
-    prev_episode_counts[i] += len(recent_r)
-  if len(recent_rewards) > 0:
-    recent_mean_r = np.mean(recent_rewards)
-    recent_mean_l = np.mean(recent_lengths)
-  else:
-    recent_mean_r = 0.0
-    recent_mean_l = 0.0
-  return recent_mean_r, recent_mean_l
-
-
 def objective(trial, env_id):
   params = suggest_hyperparams(trial)
+
   if params["net_arch_str"] == "small":
     net_arch = dict(pi=[64, 64], vf=[64, 64])
   else:
     net_arch = dict(pi=[128, 128], vf=[128, 128])
   policy_kwargs = dict(net_arch=net_arch, activation_fn=nn.Tanh)
 
+  # YOUR setup: 14 envs with noise for BOTH training and evaluation
   n_envs = 14
   noise_type = "uniform"
   noise_level = 0.1
-  vec_env = SubprocVecEnv([make_env(env_id, noise_type, noise_level) for _ in range(n_envs)])
-  vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
+
+  # Training env
+  train_env = SubprocVecEnv([make_env(env_id, noise_type, noise_level) for _ in range(n_envs)])
+  train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
+
+  # Evaluation env: SAME as training — noisy, 14 parallel envs, norm_reward=True
+  eval_env = SubprocVecEnv([make_env(env_id, noise_type, noise_level) for _ in range(n_envs)])
+  eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
+
   model = TRPOR(
     policy="MlpPolicy",
-    env=vec_env,
+    env=train_env,
     learning_rate=params["learning_rate"],
     n_steps=params["n_steps"],
     batch_size=params["batch_size"],
@@ -136,56 +130,47 @@ def objective(trial, env_id):
     seed=42,
   )
 
-  total_timesteps = 1_000_000
-  eval_interval = 50_000
-  prev_episode_counts = [0] * n_envs
+  n_timesteps = 1_000_000
+  eval_freq = 20_000
+  n_eval_episodes = 10
 
-  for step in range(eval_interval, total_timesteps + 1, eval_interval):
-    model.learn(total_timesteps=eval_interval, reset_num_timesteps=False, progress_bar=False)
-    recent_mean_r, recent_mean_l = recent_metrics(vec_env, prev_episode_counts, n_envs)
-
-    intermediate_metric = 1000 * recent_mean_r + 1000 * recent_mean_l
-    trial.report(intermediate_metric, step)
-
-    if trial.should_prune():
-      vec_env.close()
-      raise optuna.TrialPruned()
-
-  # Final evaluation without noise
-  eval_n_envs = n_envs
-  n_eval_episodes = 1000
-
-  eval_vec = SubprocVecEnv([make_env(env_id) for _ in range(eval_n_envs)])
-  eval_vec = VecNormalize(eval_vec, training=False, norm_obs=True, norm_reward=False, clip_obs=10.0)
-  eval_vec.obs_rms = vec_env.obs_rms.copy()
-
-  episode_rewards, episode_lengths = evaluate_policy(
-    model,
-    eval_vec,
+  eval_callback = TrialEvalCallback(
+    eval_env=eval_env,
+    trial=trial,
     n_eval_episodes=n_eval_episodes,
+    eval_freq=eval_freq,
     deterministic=True,
-    return_episode_rewards=True,
   )
-  final_mean_r = np.mean(episode_rewards)
-  final_mean_l = np.mean(episode_lengths)
-  final_metric = 1000 * final_mean_r + 1000 * final_mean_l
-  print(f"Trial {trial.number} - Metric: {final_metric:.2f}")
-  eval_vec.close()
-  vec_env.close()
-  return final_metric
+
+  model.learn(total_timesteps=n_timesteps, callback=eval_callback)
+
+  return eval_callback.last_mean_reward  # Optuna maximizes this (normalized reward under noise)
 
 
 if __name__ == "__main__":
-  multiprocessing.set_start_method("spawn")
+  multiprocessing.set_start_method("spawn", force=True)
+
   envs = ["HalfCheetah-v5", "Hopper-v5", "Swimmer-v5", "Walker2d-v5", "Humanoid-v5", "HumanoidStandup-v5"]
   batch = 1000
+
+  optuna_dir = os.path.expanduser("~/optuna")
+  os.makedirs(optuna_dir, exist_ok=True)
+
   for env_id in envs:
     study_name = f"trpor-{env_id}-tuning"
-    dir_path = os.path.expanduser("~optuna")
-    os.makedirs(dir_path, exist_ok=True)
-    file_path = os.path.join(dir_path, f"{study_name}_log")
-    backend = JournalFileBackend(file_path)
-    storage = JournalStorage(backend)
+    file_path = os.path.join(optuna_dir, f"{study_name}_log")
+
+    storage = JournalStorage(JournalFileBackend(file_path))
     pruner = MedianPruner(n_startup_trials=5, n_warmup_steps=1, interval_steps=1)
-    study = optuna.create_study(study_name=study_name, direction="maximize", storage=storage, pruner=pruner, load_if_exists=True)
+    sampler = optuna.samplers.TPESampler(n_startup_trials=5)
+
+    study = optuna.create_study(
+      study_name=study_name,
+      direction="maximize",
+      storage=storage,
+      pruner=pruner,
+      sampler=sampler,
+      load_if_exists=True,
+    )
+
     study.optimize(lambda trial: objective(trial, env_id), n_trials=batch)
