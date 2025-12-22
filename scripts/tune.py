@@ -65,7 +65,6 @@ envs = ["HalfCheetah-v5", "Hopper-v5", "Swimmer-v5", "Walker2d-v5", "Humanoid-v5
 ent_coefs = sorted(
   set(
     [
-      0.0,
       0.00001,
       0.0001,
       0.0002,
@@ -87,9 +86,13 @@ ent_coefs = sorted(
       0.009,
       0.01,
       0.02,
+      0.03,
+      0.04,
+      0.05,
+      0.06,
+      0.07,
       0.08,
-      0.1,
-      0.5,
+      0.09,
     ]
   )
 )

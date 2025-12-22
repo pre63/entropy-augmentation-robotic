@@ -228,4 +228,6 @@ assets*/**/*.mp4
 assets*/**/*.bin
 ~archive
 ~optuna
+~optuna1
 .DS_Store
+assets1

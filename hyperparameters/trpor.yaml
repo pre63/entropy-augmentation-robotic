@@ -5,41 +5,35 @@ HalfCheetah-v5: &defaults
   n_steps: 2048
   gamma: 0.99
   gae_lambda: 0.95
-  sub_sampling_factor: 0.5
-  cg_max_steps: 5
+  sub_sampling_factor: 1.0
+  cg_max_steps: 25 #25 or 5
   cg_damping: 0.1
-  n_critic_updates: 5
-  learning_rate: 0.007
-  target_kl: 0.07
+  n_critic_updates: 20 # 20 or 10
   net_arch: small
   activation_fn: tanh
-  ent_coef: 0.001
+  ent_coef: 0.003520817951140992
+  target_kl: 0.0116573228335872
+  learning_rate: 0.0014781895445939986
 
-# Tuned
 Hopper-v5:
   <<: *defaults
-  ent_coef: 0.0003
+  ent_coef: 0.0003 #Tuned
 
-# Tuned
 Walker2d-v5:
   <<: *defaults
-  ent_coef: 
+  ent_coef: 0.0006 #Tuned
 
-# Tuned
-Humanoid-v5:
-  <<: *defaults
-  net_arch: medium  # Approx [128, 128]; adapted from original TRPO paper for complex envs
-  ent_coef: 0.0005
-
-# Tuned
-HumanoidStandup-v5:
-  <<: *defaults
-  net_arch: medium  # Approx [128, 128]; adapted from original TRPO paper for complex envs
-  ent_coef: 0.0002
-
-# Tuned
 Swimmer-v5:
   <<: *defaults
   gamma: 0.9999
-  ent_coef: 0.03
+  ent_coef: 0.0056 #Tuned
 
+Humanoid-v5:
+  <<: *defaults
+  net_arch: medium  # Approx [128, 128]; adapted from original TRPO paper for complex envs
+  ent_coef: 0.0005 #Tuned
+
+HumanoidStandup-v5:
+  <<: *defaults
+  net_arch: medium  # Approx [128, 128]; adapted from original TRPO paper for complex envs
+  ent_coef: 0.0009 # Tuned

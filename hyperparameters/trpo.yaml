@@ -6,14 +6,14 @@ HalfCheetah-v5: &defaults
   n_steps: 1024
   gamma: 0.99
   gae_lambda: 0.95
-  sub_sampling_factor: 1
+  sub_sampling_factor: 1.0
   cg_max_steps: 25
   cg_damping: 0.1
   n_critic_updates: 20
-  learning_rate: 0.001
-  target_kl: 0.01  # max_kl in TRPO
   net_arch: small  # [64, 64]
   activation_fn: tanh
+  target_kl: 0.01  # max_kl in TRPO
+  learning_rate: 0.001
 
 # Source: RL Baselines3 Zoo hyperparams/trpo.yml (tuned for Hopper-v4; strong performance on locomotion tasks)
 # Tuned

@@ -15,6 +15,65 @@ from sb3.noise import MonitoredEntropyInjectionWrapper
 from sb3.trpo import TRPO
 
 
+def debug_summary(policy_objective: th.Tensor, raw_regularization_term: th.Tensor, regularization_term: th.Tensor):
+  """
+    Prints a short summary of the entropy regularization impact, including sign (p/n) and percentage magnitude relative to the surrogate.
+    Handles scalars or means of batches.
+    """
+  # Get scalar values (mean if batched)
+  surrogate = policy_objective.mean().item() if policy_objective.numel() > 1 else policy_objective.item()
+  original_reg = raw_regularization_term.mean().item() if raw_regularization_term.numel() > 1 else raw_regularization_term.item()
+  applied_reg = regularization_term.mean().item() if regularization_term.numel() > 1 else regularization_term.item()
+
+  # Percentage magnitude (avoid div by zero)
+  if abs(surrogate) > 1e-8:
+    percent_change = (applied_reg / abs(surrogate)) * 100
+  else:
+    percent_change = 0.0  # Or inf, but cap at 0 for safety
+
+  # Short message
+  print(f"Reg: -{percent_change:.2f}%")
+
+
+def compute_surrogate_objective_entropy(policy_objective: th.Tensor, entropy: th.Tensor, ent_coef: th.Tensor, debug: bool = False) -> th.Tensor:
+  """
+    We handicap the surrogate objective with entropy to promote exploration.
+    We need to ensure non negative subtractions.
+    if the policy is negative, double negative gives us positive. which is really bad for our goal of exploratory improvement and monotonic improvement guarantee.
+    Optionally print a summary of the impact of the entropy regularization (disabled by default for performance).
+
+    Mathematically:
+
+    Let S denote the surrogate policy objective (a scalar value).
+
+    Let E denote the entropy term (a scalar, which may be positive or negative depending on context).
+
+    Let c > 0 denote the entropy coefficient.
+
+    The raw regularization term is r = c * E.
+
+    To always apply a penalty that helps choose better gradients, we use the absolute magnitude:
+
+    J = S - |r|
+
+    This ensures a consistent downward handicap, preventing boosts and stabilizing the system, especially in cases where signs could lead to unintended effects.
+
+    Supports batched inputs for vectorized computation.
+    """
+  # Compute raw regularization term (handles batches via broadcasting)
+  raw_regularization_term = ent_coef * entropy
+
+  # Always apply absolute penalty
+  regularization_term = th.abs(raw_regularization_term)
+
+  new_policy_objective = policy_objective - regularization_term
+
+  if debug:
+    debug_summary(policy_objective, raw_regularization_term, regularization_term)
+
+  return new_policy_objective
+
+
 class TRPOR(TRPO):
   """
     TRPOR: Entropy-Regularized Trust Region Policy Optimization with Reinforcement Learning
@@ -133,7 +192,12 @@ class TRPOR(TRPO):
       ratio = th.exp(log_prob - old_log_prob)
 
       # surrogate policy objective with entropy regularization (matches TRPOR)
-      policy_objective = (advantages * ratio).mean() + self.ent_coef * distribution.entropy().mean()
+      policy_objective = (advantages * ratio).mean()
+      policy_objective = compute_surrogate_objective_entropy(
+        policy_objective,
+        distribution.entropy().mean(),
+        self.ent_coef,
+      )
 
       # KL divergence
       kl_div = kl_divergence(distribution, old_distribution).mean()
@@ -180,7 +244,13 @@ class TRPOR(TRPO):
 
           # New policy objective
           ratio = th.exp(log_prob - old_log_prob)
+          line_search_entropy = self.ent_coef * distribution.entropy().mean()
           new_policy_objective = (advantages * ratio).mean()
+          new_policy_objective = compute_surrogate_objective_entropy(
+            new_policy_objective,
+            distribution.entropy().mean(),
+            self.ent_coef,
+          )
 
           # New KL-divergence
           kl_div = kl_divergence(distribution, old_distribution).mean()

@@ -50,24 +50,24 @@ setup:
 	
 experiments: fix setup
 	@source .venv/bin/activate; \
-	PYTHONPATH=. python -m scripts.experiments 2>&1 | tee -a ~logs/experiments
+	CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python -m scripts.experiments 2>&1 | tee -a ~logs/experiments
 
 report: fix setup
 	@rm -f reports/.tmp
 	@source .venv/bin/activate; \
-	PYTHONPATH=. python -m scripts.report 2>&1 | tee -a reports/.tmp
+	CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python -m scripts.report 2>&1 | tee -a reports/.tmp
 	@mv reports/.tmp reports/report.md
 
 actions: fix
 	@source .venv/bin/activate; \
-	PYTHONPATH=. python -m scripts.actions
+	CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python -m scripts.actions
 
 tune: fix
 	@mkdir -p ~logs
 	@touch ~logs/tune
 	@source .venv/bin/activate; \
-	PYTHONPATH=. python -m scripts.tune 2>&1 | tee -a ~logs/tune
+	CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python -m scripts.tune 2>&1 | tee -a ~logs/tune
 
 optuna: fix
 	@source .venv/bin/activate; \
-	PYTHONPATH=. python -m scripts.optuna 2>&1 | tee -a ~logs/optuna
+	CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python -m scripts.optuna 2>&1 | tee -a ~logs/optuna
