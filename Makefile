@@ -76,3 +76,8 @@ optuna: fix
 domain: fix
 	@source .venv/bin/activate; \
 	CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python -m sb3.domain 2>&1 | tee -a ~logs/domain
+
+
+bp: fix
+	@source .venv/bin/activate; \
+	CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python -m scripts.bp 2>&1 | tee -a ~logs/bp

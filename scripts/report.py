@@ -1000,7 +1000,7 @@ if __name__ == "__main__":
   disable_downsampling = False
   disable_smoothing = False
 
-  base_compare_dirs = ["assets"]
+  base_compare_dirs = ["bp_comparison"]
   for base_compare_dir in base_compare_dirs:
     subdirs = sorted([d for d in os.listdir(base_compare_dir) if os.path.isdir(os.path.join(base_compare_dir, d))])
     print("# Table of Contents\n")

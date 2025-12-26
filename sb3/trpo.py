@@ -121,6 +121,11 @@ class TRPO(TRPO):
     rewards,
     policy_objective,
     kl_div,
+    raw_policy_objective_values=[],
+    entropy_terms=[],
+    regularization_ratios=[],
+    raw_improvements=[],
+    line_search_coeffs=[],
   ):
     """Overridable method for computing metrics."""
 
@@ -152,6 +157,11 @@ class TRPO(TRPO):
       ("reward_delta", reward_deltas),
       ("policy_std", policy_stds),
       ("reward", rewards),
+      ("raw_policy_obj", raw_policy_objective_values),
+      ("entropy_term", entropy_terms),
+      ("reg_ratio", regularization_ratios),
+      ("raw_improv", raw_improvements),
+      ("ls_coeff", line_search_coeffs),
     ]:
       stats = compute_stats(arr)
       for stat_name, value in stats.items():
@@ -175,8 +185,13 @@ class TRPO(TRPO):
     self._update_learning_rate(self.policy.optimizer)
 
     policy_objective_values = []
+    raw_policy_objective_values = []
+    entropy_terms = []
+    regularization_ratios = []
+    raw_improvements = []
     kl_divergences = []
     line_search_results = []
+    line_search_coeffs = []
     value_losses = []
 
     # This will only loop once (get all data in one go)
@@ -184,54 +199,53 @@ class TRPO(TRPO):
 
       # Optional: sub-sample data for faster computation
       if self.sub_sampling_factor > 1:
+        indices = slice(None, None, self.sub_sampling_factor)
         rollout_data = RolloutBufferSamples(
-          rollout_data.observations[:: self.sub_sampling_factor],
-          rollout_data.actions[:: self.sub_sampling_factor],
-          None,  # old values, not used here
-          rollout_data.old_log_prob[:: self.sub_sampling_factor],
-          rollout_data.advantages[:: self.sub_sampling_factor],
-          None,  # returns, not used here
+          rollout_data.observations[indices],
+          rollout_data.actions[indices],
+          None,  # type: ignore[arg-type]  # old values, not used here
+          rollout_data.old_log_prob[indices],
+          rollout_data.advantages[indices],
+          rollout_data.returns[indices],  # Include returns for critic
         )
 
+      observations = rollout_data.observations
       actions = rollout_data.actions
+      returns = rollout_data.returns
+      advantages = rollout_data.advantages
+      old_log_prob = rollout_data.old_log_prob
+
       if isinstance(self.action_space, spaces.Discrete):
         # Convert discrete action from float to long
-        actions = rollout_data.actions.long().flatten()
-
-      # Re-sample the noise matrix because the log_std has changed
-      if self.use_sde:
-        # batch_size is only used for the value function
-        self.policy.reset_noise(actions.shape[0])
+        actions = actions.long().flatten()
 
       with th.no_grad():
-        # Note: is copy enough, no need for deepcopy?
-        # If using gSDE and deepcopy, we need to use `old_distribution.distribution.distribution`
-        # directly to avoid PyTorch errors.
-        old_distribution = copy.copy(self.policy.get_distribution(rollout_data.observations))
+        # Use deepcopy for safety with complex distributions
+        old_distribution = copy.deepcopy(self.policy.get_distribution(observations))
 
-      distribution = self.policy.get_distribution(rollout_data.observations)
+      distribution = self.policy.get_distribution(observations)
       log_prob = distribution.log_prob(actions)
 
-      advantages = rollout_data.advantages
       if self.normalize_advantage:
-        advantages = (advantages - advantages.mean()) / (rollout_data.advantages.std() + 1e-8)
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
       # ratio between old and new policy, should be one at the first iteration
-      ratio = th.exp(log_prob - rollout_data.old_log_prob)
+      ratio = th.exp(log_prob - old_log_prob)
+
+      # Raw surrogate policy objective (initial, should be ~0)
+      initial_raw_policy_objective = (advantages * ratio).mean()
 
       # surrogate policy objective
+      applied_entropy_term = None
       policy_objective = self._compute_policy_objective(advantages, ratio, distribution)
 
       # KL divergence
       kl_div = kl_divergence(distribution, old_distribution).mean()
-      kl_div_mean = kl_div.item()
 
       # Surrogate & KL gradient
       self.policy.optimizer.zero_grad()
 
       actor_params, policy_objective_gradients, grad_kl, grad_shape = self._compute_actor_grad(kl_div, policy_objective)
-
-      grad_norm_policy = th.norm(policy_objective_gradients).item()
 
       # Hessian-vector dot product function used in the conjugate gradient step
       hessian_vector_product_fn = partial(self.hessian_vector_product, actor_params, grad_kl)
@@ -246,7 +260,7 @@ class TRPO(TRPO):
       # Maximal step length
       line_search_max_step_size = 2 * self.target_kl
       line_search_max_step_size /= th.matmul(search_direction, hessian_vector_product_fn(search_direction, retain_graph=False))
-      line_search_max_step_size = th.sqrt(line_search_max_step_size)
+      line_search_max_step_size = th.sqrt(line_search_max_step_size)  # type: ignore[assignment, arg-type]
 
       line_search_backtrack_coeff = 1.0
       original_actor_params = [param.detach().clone() for param in actor_params]
@@ -255,7 +269,6 @@ class TRPO(TRPO):
       with th.no_grad():
         # Line-search (backtracking)
         for _ in range(self.line_search_max_iter):
-
           start_idx = 0
           # Applying the scaled step direction
           for param, original_param, shape in zip(actor_params, original_actor_params, grad_shape):
@@ -266,12 +279,16 @@ class TRPO(TRPO):
             start_idx += n_params
 
           # Recomputing the policy log-probabilities
-          distribution = self.policy.get_distribution(rollout_data.observations)
+          distribution = self.policy.get_distribution(observations)
           log_prob = distribution.log_prob(actions)
 
-          # New policy objective
-          ratio = th.exp(log_prob - rollout_data.old_log_prob)
-          new_policy_objective = (advantages * ratio).mean()
+          # Update ratio with new log_prob
+          ratio = th.exp(log_prob - old_log_prob)
+
+          # New raw policy objective
+          raw_new_policy_objective = (advantages * ratio).mean()
+
+          new_policy_objective = self._compute_policy_objective(advantages, ratio, distribution)
 
           # New KL-divergence
           kl_div = kl_divergence(distribution, old_distribution).mean()
@@ -294,10 +311,18 @@ class TRPO(TRPO):
             param.data = original_param.data.clone()
 
           policy_objective_values.append(policy_objective.item())
-          kl_divergences.append(0)
+          raw_policy_objective_values.append(initial_raw_policy_objective.item())
+          entropy_terms.append(applied_entropy_term.item())
+          regularization_ratios.append(abs(applied_entropy_term.item()) / (abs(initial_raw_policy_objective.item()) + 1e-8))
+          raw_improvements.append(0.0)  # No improvement
+          kl_divergences.append(0.0)
+          line_search_coeffs.append(0.0)  # No step
         else:
           policy_objective_values.append(new_policy_objective.item())
+          raw_policy_objective_values.append(raw_new_policy_objective.item())
+          raw_improvements.append(raw_new_policy_objective.item() - initial_raw_policy_objective.item())
           kl_divergences.append(kl_div.item())
+          line_search_coeffs.append(line_search_backtrack_coeff)
 
     # Critic update
     value_grad_norms = []
@@ -364,19 +389,30 @@ class TRPO(TRPO):
       reward_deltas,
       rewards,
       po,
-      kl_div_mean,
+      kl_div,
+      # Add new for save
+      raw_policy_objective_values,
+      entropy_terms,
+      regularization_ratios,
+      raw_improvements,
+      line_search_coeffs,
     )
 
     # Logs
-    # add serogate objecive and antropy
+    # add surrogate objective and entropy
     self.logger.record("train/entropy", np.mean(entropies))
     self.logger.record("train/advantage_mean", np.mean(advantages_numpy))
     self.logger.record("train/advantage_std", np.std(advantages_numpy))
     self.logger.record("train/policy_objective", np.mean(policy_objective_values))
+    self.logger.record("train/raw_policy_objective", np.mean(raw_policy_objective_values))
+    self.logger.record("train/entropy_regularization_term", np.mean(entropy_terms))
+    self.logger.record("train/regularization_ratio", np.mean(regularization_ratios))
+    self.logger.record("train/raw_improvement", np.mean(raw_improvements))
     self.logger.record("train/value_loss", np.mean(value_losses))
     self.logger.record("train/kl_divergence_loss", np.mean(kl_divergences))
     self.logger.record("train/explained_variance", explained_var)
     self.logger.record("train/is_line_search_success", np.mean(line_search_results))
+    self.logger.record("train/avg_line_search_coeff", np.mean(line_search_coeffs))
     if hasattr(self.policy, "log_std"):
       self.logger.record("train/std", th.exp(self.policy.log_std).mean().item())
 

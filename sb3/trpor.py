@@ -15,86 +15,36 @@ from sb3.noise import MonitoredEntropyInjectionWrapper
 from sb3.trpo import TRPO
 
 
-def debug_summary(policy_objective: th.Tensor, raw_regularization_term: th.Tensor, regularization_term: th.Tensor):
-  """
-    Prints a short summary of the entropy regularization impact, including sign (p/n) and percentage magnitude relative to the surrogate.
-    Handles scalars or means of batches.
-    """
-  # Get scalar values (mean if batched)
-  surrogate = policy_objective.mean().item() if policy_objective.numel() > 1 else policy_objective.item()
-  original_reg = raw_regularization_term.mean().item() if raw_regularization_term.numel() > 1 else raw_regularization_term.item()
-  applied_reg = regularization_term.mean().item() if regularization_term.numel() > 1 else regularization_term.item()
-
-  # Percentage magnitude (avoid div by zero)
-  if abs(surrogate) > 1e-8:
-    percent_change = (applied_reg / abs(surrogate)) * 100
-  else:
-    percent_change = 0.0  # Or inf, but cap at 0 for safety
-
-  # Short message
-  print(f"Reg: -{percent_change:.2f}%")
-
-
-def compute_surrogate_objective_entropy(policy_objective: th.Tensor, entropy: th.Tensor, ent_coef: th.Tensor, debug: bool = False) -> th.Tensor:
-  """
-    We handicap the surrogate objective with entropy to promote exploration.
-    We need to ensure non negative subtractions.
-    if the policy is negative, double negative gives us positive. which is really bad for our goal of exploratory improvement and monotonic improvement guarantee.
-    Optionally print a summary of the impact of the entropy regularization (disabled by default for performance).
-
-    Mathematically:
-
-    Let S denote the surrogate policy objective (a scalar value).
-
-    Let E denote the entropy term (a scalar, which may be positive or negative depending on context).
-
-    Let c > 0 denote the entropy coefficient.
-
-    The raw regularization term is r = c * E.
-
-    To always apply a penalty that helps choose better gradients, we use the absolute magnitude:
-
-    J = S - |r|
-
-    This ensures a consistent downward handicap, preventing boosts and stabilizing the system, especially in cases where signs could lead to unintended effects.
-
-    Supports batched inputs for vectorized computation.
-    """
-  # Compute raw regularization term (handles batches via broadcasting)
-  raw_regularization_term = ent_coef * entropy
-
-  # Always apply absolute penalty
-  regularization_term = th.abs(raw_regularization_term)
-
-  new_policy_objective = policy_objective - regularization_term
-
-  if debug:
-    debug_summary(policy_objective, raw_regularization_term, regularization_term)
-
-  return new_policy_objective
-
-
 class TRPOR(TRPO):
   """
     TRPOR: Entropy-Regularized Trust Region Policy Optimization with Reinforcement Learning
 
     This is an extension of the standard Trust Region Policy Optimization (TRPO) algorithm
-    that incorporates entropy regularization into the policy objective. The entropy bonus
-    encourages exploration and prevents premature convergence to deterministic policies.
+    that incorporates entropy regularization into the policy objective. The entropy term
+    can be applied as either a bonus (to encourage exploration) or a penalty (to handicap uncertainty
+    and favor confident paths), controlled by the `entropy_mode` hyperparameter.
 
-    Key Features:
-    - Adds an entropy bonus term to the policy objective to promote exploration.
-    - Retains the KL-divergence constraint from TRPO for stable policy updates.
-    - The entropy coefficient (`ent_coef`) is tunable for balancing exploration and exploitation.
-    - Suitable for environments with sparse rewards where additional exploration is needed.
+    Additional metrics are logged to measure the hypothesis that the bonus mode may hijack the line search
+    when the entropy term dominates the raw surrogate, leading to suboptimal updates, while penalty mode
+    avoids this by handicapping high-entropy proposals.
+
+    Key Added Metrics:
+    - raw_policy_objective: The surrogate objective without entropy regularization.
+    - entropy_regularization_term: The entropy term applied (positive for bonus, negative for penalty in effect).
+    - regularization_ratio: |entropy_term| / |raw_objective| to measure dominance.
+    - raw_improvement: Improvement in raw surrogate after update.
+    - avg_line_search_coeff: Average backtracking coefficient (closer to 1 indicates less backtracking, potentially tiny steps in bonus mode).
 
     Mathematical Formulation:
     -------------------------
     Standard TRPO objective:
         L(θ) = E_t [ (π_θ(a_t | s_t) / π_θ_old(a_t | s_t)) * Â(s_t, a_t) ]
 
-    TRPOR modified objective:
+    TRPOR modified objective (bonus mode):
         L(θ) = E_t [ (π_θ(a_t | s_t) / π_θ_old(a_t | s_t)) * Â(s_t, a_t) + α * H(π_θ) ]
+
+    TRPOR modified objective (penalty mode):
+        L(θ) = E_t [ (π_θ(a_t | s_t) / π_θ_old(a_t | s_t)) * Â(s_t, a_t) - α * |H(π_θ)| ]
 
     where:
     - π_θ is the current policy.
@@ -109,8 +59,10 @@ class TRPOR(TRPO):
         The policy model to be used (e.g., "MlpPolicy").
     env : Union[GymEnv, str]
         The environment to learn from.
+    entropy_mode : str, optional
+        Mode for entropy regularization: 'bonus' to add entropy or 'penalty' to subtract (default: 'penalty').
     ent_coef : float, optional
-        Entropy coefficient controlling the strength of the entropy bonus (default: 0.01).
+        Entropy coefficient controlling the strength of the entropy term (default: 0.01).
     learning_rate : Union[float, Schedule], optional
         Learning rate for the optimizer (default: 1e-3).
     n_steps : int, optional
@@ -126,18 +78,54 @@ class TRPOR(TRPO):
 
     Differences from Standard TRPO:
     -------------------------------
-    - **Entropy Bonus:** Adds entropy to the policy objective for better exploration.
+    - **Entropy Term:** Adds entropy to the policy objective as bonus or penalty based on mode.
     - **Policy Objective:** Modified to include the entropy coefficient (`ent_coef`).
     - **Line Search:** Considers the entropy term while checking policy improvement.
-    - **Logging:** Logs entropy-regularized objectives and KL divergence values.
+    - **Logging:** Logs entropy-regularized objectives, KL divergence values, and hypothesis-measuring metrics.
 
     """
 
-  def __init__(self, *args, ent_coef=0.01, batch_size=32, **kwargs):
+  def __init__(self, *args, entropy_mode: str = "penalty", ent_coef=0.01, batch_size=32, normalize_entropy=False, **kwargs):
+    if entropy_mode not in ["bonus", "penalty"]:
+      raise ValueError("entropy_mode must be 'bonus' or 'penalty'")
     super().__init__(*args, **kwargs)
 
+    self.entropy_mode = entropy_mode
     self.ent_coef = ent_coef
     self.batch_size = batch_size
+    self.normalize_entropy = normalize_entropy
+
+  def _compute_policy_objective(self, advantages, ratio, distribution):
+    """Overridable method for computing policy objective."""
+    policy_objective = (advantages * ratio).mean()
+    entropy = distribution.entropy()
+
+    entropy_term = entropy.mean()  # Fallback to original
+
+    # Normalize entropy to match surrogate magnitude if enabled
+    if self.normalize_entropy:
+      surrogate_mag = th.abs(policy_objective) + 1e-8
+      entropy_mag = th.abs(entropy_term) + 1e-8
+      scale_factor = surrogate_mag / entropy_mag
+      entropy_term = entropy_term * scale_factor
+
+    # Compute raw regularization term
+    raw_regularization_term = self.ent_coef * entropy_term
+
+    # Always apply absolute for consistency
+    regularization_term = th.abs(raw_regularization_term)
+
+    # Apply based on mode
+    if self.entropy_mode == "bonus":
+      new_policy_objective = policy_objective + regularization_term
+      applied_term = regularization_term  # Positive for bonus
+    elif self.entropy_mode == "penalty":
+      new_policy_objective = policy_objective - regularization_term
+      applied_term = -regularization_term  # Negative for penalty
+
+    self.applied_entropy_term = applied_term  # Store for logging
+
+    return new_policy_objective
 
   def train(self) -> None:
     """
@@ -149,8 +137,13 @@ class TRPOR(TRPO):
     self._update_learning_rate(self.policy.optimizer)
 
     policy_objective_values = []
+    raw_policy_objective_values = []
+    entropy_terms = []
+    regularization_ratios = []
+    raw_improvements = []
     kl_divergences = []
     line_search_results = []
+    line_search_coeffs = []
     value_losses = []
 
     # This will only loop once (get all data in one go)
@@ -191,14 +184,12 @@ class TRPOR(TRPO):
       # ratio between old and new policy, should be one at the first iteration
       ratio = th.exp(log_prob - old_log_prob)
 
-      # surrogate policy objective with entropy regularization (matches TRPOR)
-      policy_objective = (advantages * ratio).mean()
-      policy_objective = compute_surrogate_objective_entropy(
-        policy_objective,
-        distribution.entropy().mean(),
-        self.ent_coef,
-      )
+      # Raw surrogate policy objective (initial, should be ~0)
+      initial_raw_policy_objective = (advantages * ratio).mean()
 
+      # surrogate policy objective with entropy regularization (matches TRPOR)
+      policy_objective = self._compute_policy_objective(advantages, ratio, distribution)
+      applied_entropy_term = self.applied_entropy_term
       # KL divergence
       kl_div = kl_divergence(distribution, old_distribution).mean()
 
@@ -242,15 +233,13 @@ class TRPOR(TRPO):
           distribution = self.policy.get_distribution(observations)
           log_prob = distribution.log_prob(actions)
 
-          # New policy objective
+          # Update ratio with new log_prob
           ratio = th.exp(log_prob - old_log_prob)
-          line_search_entropy = self.ent_coef * distribution.entropy().mean()
-          new_policy_objective = (advantages * ratio).mean()
-          new_policy_objective = compute_surrogate_objective_entropy(
-            new_policy_objective,
-            distribution.entropy().mean(),
-            self.ent_coef,
-          )
+
+          # New raw policy objective
+          raw_new_policy_objective = (advantages * ratio).mean()
+          new_policy_objective = self._compute_policy_objective(advantages, ratio, distribution)
+          new_applied_entropy_term = self.applied_entropy_term
 
           # New KL-divergence
           kl_div = kl_divergence(distribution, old_distribution).mean()
@@ -273,10 +262,21 @@ class TRPOR(TRPO):
             param.data = original_param.data.clone()
 
           policy_objective_values.append(policy_objective.item())
+          raw_policy_objective_values.append(initial_raw_policy_objective.item())
+          entropy_terms.append(applied_entropy_term.item())
+          regularization_ratios.append(abs(applied_entropy_term.item()) / (abs(initial_raw_policy_objective.item()) + 1e-8))
+          raw_improvements.append(0.0)  # No improvement
           kl_divergences.append(0.0)
+          line_search_coeffs.append(0.0)  # No step
         else:
           policy_objective_values.append(new_policy_objective.item())
+          raw_policy_objective_values.append(raw_new_policy_objective.item())
+          entropy_terms.append(new_applied_entropy_term.item())
+          reg_ratio = abs(new_applied_entropy_term.item()) / (abs(raw_new_policy_objective.item()) + 1e-8)
+          regularization_ratios.append(reg_ratio)
+          raw_improvements.append(raw_new_policy_objective.item() - initial_raw_policy_objective.item())
           kl_divergences.append(kl_div.item())
+          line_search_coeffs.append(line_search_backtrack_coeff)
 
     # Critic update
     value_grad_norms = []
@@ -344,18 +344,29 @@ class TRPOR(TRPO):
       rewards,
       po,
       kl_div,
+      # Add new for save
+      raw_policy_objective_values,
+      entropy_terms,
+      regularization_ratios,
+      raw_improvements,
+      line_search_coeffs,
     )
 
     # Logs
-    # add serogate objecive and antropy
+    # add surrogate objective and entropy
     self.logger.record("train/entropy", np.mean(entropies))
     self.logger.record("train/advantage_mean", np.mean(advantages_numpy))
     self.logger.record("train/advantage_std", np.std(advantages_numpy))
     self.logger.record("train/policy_objective", np.mean(policy_objective_values))
+    self.logger.record("train/raw_policy_objective", np.mean(raw_policy_objective_values))
+    self.logger.record("train/entropy_regularization_term", np.mean(entropy_terms))
+    self.logger.record("train/regularization_ratio", np.mean(regularization_ratios))
+    self.logger.record("train/raw_improvement", np.mean(raw_improvements))
     self.logger.record("train/value_loss", np.mean(value_losses))
     self.logger.record("train/kl_divergence_loss", np.mean(kl_divergences))
     self.logger.record("train/explained_variance", explained_var)
     self.logger.record("train/is_line_search_success", np.mean(line_search_results))
+    self.logger.record("train/avg_line_search_coeff", np.mean(line_search_coeffs))
     if hasattr(self.policy, "log_std"):
       self.logger.record("train/std", th.exp(self.policy.log_std).mean().item())
 

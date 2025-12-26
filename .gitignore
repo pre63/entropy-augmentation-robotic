@@ -221,7 +221,8 @@ reports/.tmp
 .logs/
 ~logs/
 tree
-
+assets
+reports
 assets*/**/*.zip
 assets*/**/*.pkl
 assets*/**/*.mp4
@@ -233,3 +234,4 @@ assets*/**/*.bin
 assets1
 trpo_halfcheetah.zip
 vecnormalize.pkl
+bp_*

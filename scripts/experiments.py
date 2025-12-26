@@ -142,6 +142,11 @@ def run_experiment(configs, n_envs, total_timesteps, num_runs, n_eval_episodes):
       try:
         env = SubprocVecEnv([make_env(env_id, params.get("noise_configs", None)) for _ in range(n_envs)])
 
+        # print hyperpameters
+        print(f"  Hyperparameters for {key}:")
+        for k, v in params.items():
+          print(f"    {k}: {v}")
+
         model = Variant("MlpPolicy", env, verbose=1, device="cpu", **params)
         callback = RewardLoggerCallback()
         model.learn(total_timesteps=total_timesteps, callback=callback, log_interval=10000)
@@ -218,7 +223,7 @@ if __name__ == "__main__":
 
   # 1M timesteps is sufficient to see the trends in performance for these environments, sampling longer runs 2M, 10M has not shown significant changes in trend
   timesteps = 1_000_000
-  num_runs = 1  # 5  # then 10
+  num_runs = 100  # 5  # then 10
   algos = [TRPOR, TRPO]
 
   # Explicit dict without hardcoded conditional logic, so you can easily replace configs per env

@@ -6,14 +6,14 @@ HalfCheetah-v5: &defaults
   gamma: 0.99
   gae_lambda: 0.95
   sub_sampling_factor: 1.0
-  cg_max_steps: 25 #25 or 5
+  cg_max_steps: 5 #25 or 5 is best for exploration
   cg_damping: 0.1
-  n_critic_updates: 20 # 20 or 10
+  n_critic_updates: 5 # 20 or 10, 5 is best for exploration
   net_arch: small
   activation_fn: tanh
-  ent_coef: 0.003520817951140992
-  target_kl: 0.0116573228335872
-  learning_rate: 0.0014781895445939986
+  ent_coef: 0.05 # test: 0.0005, 0.005, 0.05
+  target_kl: 0.3 # 0.3 is best for bonus 0.5 is too much for all
+  learning_rate: 0.0015
 
 Hopper-v5:
   <<: *defaults
