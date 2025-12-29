@@ -3,7 +3,9 @@ import bisect
 import os
 import pickle
 import re
+import sys
 
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -1093,7 +1095,11 @@ def report(compare_dir, env_id, disable_downsampling=False, disable_smoothing=Fa
 
 
 if __name__ == "__main__":
-  import matplotlib as mpl
+  # take param --folder fist and oly argument
+  folder_arg = "bp_comparison"
+  if len(sys.argv) > 1:
+    folder_arg = sys.argv[1]
+  print(f"Using folder argument: {folder_arg}")
 
   mpl.rcParams.update(
     {
@@ -1113,7 +1119,7 @@ if __name__ == "__main__":
   disable_downsampling = False
   disable_smoothing = False
 
-  base_compare_dirs = ["bp_comparison"]
+  base_compare_dirs = [folder_arg]
   for base_compare_dir in base_compare_dirs:
     subdirs = sorted([d for d in os.listdir(base_compare_dir) if os.path.isdir(os.path.join(base_compare_dir, d))])
     print("# Table of Contents\n")

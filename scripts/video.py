@@ -74,9 +74,7 @@ def record_model_video(model, config):
         os.remove(video_path)
 
 
-def record_all_models():
-  base_compare_dir = "bp_comparison"
-
+def record_all_models(base_compare_dir):
   for env_id in os.listdir(base_compare_dir):
     print(f"Processing directory: {env_id}")
     subdir_path = os.path.join(base_compare_dir, env_id)
@@ -109,4 +107,10 @@ def record_all_models():
 
 
 if __name__ == "__main__":
-  record_all_models()
+  # take param --folder fist and oly argument
+  folder_arg = "bp_comparison"
+  if len(sys.argv) > 1:
+    folder_arg = sys.argv[1]
+  print(f"Using folder argument: {folder_arg}")
+
+  record_all_models(folder_arg)

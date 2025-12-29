@@ -55,7 +55,7 @@ experiments: fix setup
 report: fix setup
 	@rm -f reports/.tmp
 	@source .venv/bin/activate; \
-	CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python -m scripts.report 2>&1 | tee -a reports/.tmp
+	CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python -m scripts.report $(FOLDER) 2>&1 | tee -a reports/.tmp
 	@mv reports/.tmp reports/report.md
 
 actions: fix
@@ -85,4 +85,8 @@ bp: fix
 
 video: fix
 	@source .venv/bin/activate; \
-	CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python -m scripts.video 2>&1 | tee -a ~logs/video
+	CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python -m scripts.video --folder=$(FOLDER) 2>&1 | tee -a ~logs/video
+
+trpoe: fix
+	@source .venv/bin/activate; \
+	CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python -m scripts.trpoe 2>&1 | tee -a ~logs/trpoe
